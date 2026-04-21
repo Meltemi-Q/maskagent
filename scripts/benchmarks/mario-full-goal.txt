@@ -1,0 +1,36 @@
+Build a complete self-contained browser-playable side-scrolling platformer inspired by classic Super Mario.
+Create a real project in the workspace, not a toy snippet.
+
+Required project shape:
+- index.html
+- styles.css
+- game-core.mjs
+- game-browser.mjs
+- smoke-test.mjs
+- README.md
+
+Required product behavior:
+- at least 3 handcrafted levels exported in `LEVELS`
+- keyboard controls for move left, move right, jump, restart current level, and reset whole game
+- gravity and platform collision
+- coins that increase score and are removed when collected
+- enemies that patrol and cost a life on collision
+- level goal / flag that advances to the next level
+- final win state after the last level
+- HUD showing level, score, lives, and coin counts
+- simple but polished visuals using only canvas or HTML/CSS, with no external assets and no build step
+
+Required engineering constraints:
+- keep everything static and self-contained
+- use standard browser JavaScript modules
+- `game-core.mjs` must export `LEVELS`, `createGameState`, `collectCoin`, `hitEnemy`, and `reachGoal`
+- `smoke-test.mjs` must run with plain `node smoke-test.mjs` and verify at least:
+  - LEVELS has 3 or more levels
+  - collecting a coin increases score and reduces remaining coins
+  - hitting an enemy reduces lives
+  - reaching a goal advances the level
+  - reaching the final goal sets a win flag
+- the browser game should import from `game-core.mjs` and render the game in `index.html`
+- add a short README with run instructions and controls
+
+Keep the code compact enough to fit in a single mission step, but complete enough that a human can open `index.html` and play multiple levels.

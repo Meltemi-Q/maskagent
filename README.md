@@ -35,6 +35,10 @@ scripts/live-openai-compatible-smoke.sh
 scripts/live-minimax-anthropic-smoke.sh
 scripts/claude_tmux_worker.sh
 scripts/live-claude-tmux-smoke.sh
+scripts/run_benchmark_mario_byok.sh
+scripts/run_benchmark_mario_claude_tmux.sh
+scripts/run_benchmark_mario_all.sh
+scripts/browser_platformer_check.py
 VALIDATION.md                       Validation notes and live test results
 ```
 
@@ -181,6 +185,53 @@ Deliverable:
 ```
 
 This kind of prompt is intentionally large enough to exercise planning, worker execution, validation, retries, and handoffs.
+
+## Fixed Regression Benchmark
+
+The Mario benchmark is now scripted into the repository so it can be rerun with one command instead of a manual sequence.
+
+```bash
+# BYOK llm_worker benchmark
+export GPT_PROXY_API_KEY="..."
+bash scripts/run_benchmark_mario_byok.sh
+
+# Claude Code + tmux benchmark
+bash scripts/run_benchmark_mario_claude_tmux.sh
+
+# Run both
+export GPT_PROXY_API_KEY="..."
+bash scripts/run_benchmark_mario_all.sh
+```
+
+All benchmark scripts use the same prompt in `scripts/benchmarks/mario-full-goal.txt` and run:
+
+- mission init
+- mission run
+- mission accept
+- browser-level validation
+
+You can override generic benchmark env vars such as `MASKAGENT_BENCH_HOME`, `MASKAGENT_BENCH_WORKSPACE`, and `MASKAGENT_BENCH_MISSION_ID`, or use runner-specific prefixes:
+
+- `MASKAGENT_BYOK_BENCH_*`
+- `MASKAGENT_CLAUDE_BENCH_*`
+
+## Browser-Level Validation
+
+Browser-level validation means opening the built game in a real browser, not only running `node smoke-test.mjs`.
+
+`scripts/browser_platformer_check.py` starts a temporary static server, opens the app in headless Chrome or Edge, captures a screenshot, dumps the rendered DOM, and checks for core UI markers such as `canvas`, `level`, `score`, `lives`, and `coin`.
+
+Run it directly:
+
+```bash
+python3 scripts/browser_platformer_check.py /path/to/workspace
+```
+
+Artifacts are written to `browser-check/` under the mission directory:
+
+- `browser-check.png`
+- `browser-check.dom.html`
+- `browser-check.summary.json`
 
 ## Security Notes
 

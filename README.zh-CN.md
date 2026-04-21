@@ -35,6 +35,10 @@ scripts/live-openai-compatible-smoke.sh
 scripts/live-minimax-anthropic-smoke.sh
 scripts/claude_tmux_worker.sh
 scripts/live-claude-tmux-smoke.sh
+scripts/run_benchmark_mario_byok.sh
+scripts/run_benchmark_mario_claude_tmux.sh
+scripts/run_benchmark_mario_all.sh
+scripts/browser_platformer_check.py
 VALIDATION.md                       验证记录与 live test 结果
 ```
 
@@ -181,6 +185,78 @@ Deliverable:
 ```
 
 这个 benchmark 的好处是：prompt 足够大，能把 planning、worker 执行、validator、retry、handoff 全部压一遍。
+
+## 固定回归 Benchmark
+
+“脚本化进仓库，变成固定回归”的意思是：
+
+- 不再依赖手工敲一长串 benchmark 命令
+- 把同一套 Mario benchmark 固定成仓库脚本
+- 以后只要跑同一个脚本，就能比较不同 worker / model 的结果
+
+现在仓库里已经有三条固定命令：
+
+```bash
+# BYOK llm_worker 跑完整版 Mario benchmark
+export GPT_PROXY_API_KEY="..."
+bash scripts/run_benchmark_mario_byok.sh
+
+# Claude Code + tmux 跑同一份 benchmark
+bash scripts/run_benchmark_mario_claude_tmux.sh
+
+# 顺序跑两条
+export GPT_PROXY_API_KEY="..."
+bash scripts/run_benchmark_mario_all.sh
+```
+
+默认配置：
+
+- `run_benchmark_mario_byok.sh` 默认用 `gpt-5.3-codex-spark`
+- 两条脚本都跑同一份 prompt：`scripts/benchmarks/mario-full-goal.txt`
+- 两条脚本都会执行：
+  - mission `init`
+  - mission `run`
+  - mission `accept`
+  - 浏览器级验证
+
+常用可覆盖环境变量：
+
+- `MASKAGENT_BENCH_HOME`
+- `MASKAGENT_BENCH_WORKSPACE`
+- `MASKAGENT_BENCH_MISSION_ID`
+- `MASKAGENT_BENCH_MODEL`
+- `MASKAGENT_BENCH_BASE_URL`
+- `MASKAGENT_BENCH_API_KEY_ENV`
+- `MASKAGENT_CLAUDE_TIMEOUT_S`
+
+也支持按 runner 分开的变量前缀：
+
+- `MASKAGENT_BYOK_BENCH_*`
+- `MASKAGENT_CLAUDE_BENCH_*`
+
+## 浏览器级验证
+
+是的，意思就是“真的在浏览器里跑一下”，而不是只跑 `node smoke-test.mjs`。
+
+这里我做成了 `scripts/browser_platformer_check.py`，它会：
+
+- 在 workspace 里起一个临时静态服务器
+- 用本机的 `Chrome/Edge` headless 打开页面
+- 导出浏览器渲染后的 DOM
+- 生成一张页面截图
+- 校验页面里是否真的出现 `canvas`、`level`、`score`、`lives`、`coin` 这些关键 UI 文本
+
+单独运行方式：
+
+```bash
+python3 scripts/browser_platformer_check.py /path/to/workspace
+```
+
+浏览器验证产物会保存在 mission 目录的 `browser-check/` 下，包含：
+
+- `browser-check.png`
+- `browser-check.dom.html`
+- `browser-check.summary.json`
 
 ## 安全说明
 

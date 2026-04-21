@@ -703,7 +703,7 @@ def cmd_init(a) -> int:
     (md/"working_directory.txt").write_text(str(wd), encoding="utf-8")
     s={"version":1,"missionId":mid_,"name":a.name,"goal":a.goal,"constraints":constraints,"state":"initialized","phase":"planning","status":"active","workingDirectory":str(wd),"workspacePath":str(wd),"currentStepId":None,"defaultAdapterRef":a.adapter_id,"acceptancePolicy":{"checks":checks},"latestAttemptId":None,"latestValidationId":None,"lastReviewedHandoffCount":0,"resumeFrom":"run","pauseRequested":False,"createdAt":now(),"updatedAt":now()}; save(md/"state.json",s)
     if a.worker_command:
-        step={"stepId":"step-worker","title":"Run external CLI worker","objective":a.goal,"type":"external_cli","commandTemplate":a.worker_command,"status":"pending","owner":"worker","attemptCount":0,"retryBudget":a.retry_budget,"checks":[]}
+        step={"stepId":"step-worker","title":"Run external CLI worker","objective":a.goal,"type":"external_cli","commandTemplate":a.worker_command,"status":"pending","owner":"worker","attemptCount":0,"retryBudget":a.retry_budget,"checks":[{"name":f"validate-{i+1}","kind":"command","command":c,"required":True} for i,c in enumerate(a.validate or [])]}
     elif a.step_command:
         step={"stepId":"step-shell","title":a.step_title or "Run shell worker command","objective":a.goal,"type":"shell","command":a.step_command,"status":"pending","owner":"worker","attemptCount":0,"retryBudget":a.retry_budget,"checks":[{"name":f"validate-{i+1}","kind":"command","command":c,"required":True} for i,c in enumerate(a.validate or [])]}
     else:

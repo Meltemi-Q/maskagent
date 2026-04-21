@@ -122,6 +122,27 @@ class RuntimeTests(unittest.TestCase):
         self.assertEqual(main(["accept", md.name]), 0)
         self.assertEqual(self.read(md / "state.json")["state"], "accepted")
 
+    def test_external_cli_validator_acceptance(self):
+        command = f"{sys.executable} -c \"from pathlib import Path; Path('marker.txt').write_text('ok\\\\n', encoding='utf-8')\""
+        self.assertEqual(
+            main([
+                "init",
+                "--name", "external-cli",
+                "--goal", "write marker through external cli",
+                "--workspace", str(self.workspace),
+                "--worker-command", command,
+                "--validate", "grep -q ok marker.txt",
+                "--accept", "test -f marker.txt",
+            ]),
+            0,
+        )
+        md = self.md()
+        self.assertEqual(main(["run", md.name, "--max-steps", "5"]), 0)
+        self.assertTrue((self.workspace / "marker.txt").exists())
+        self.assertEqual(self.read(md / "validation-state.json")["assertions"]["step-worker"]["status"], "pass")
+        self.assertEqual(main(["accept", md.name]), 0)
+        self.assertEqual(self.read(md / "state.json")["state"], "accepted")
+
     def test_llm_json_worker_writes_files_and_validates(self):
         os.environ["FAKE_API_KEY"] = "fake-token-not-written"
         so = server(FakeOpenAIJsonWorkerHandler)
