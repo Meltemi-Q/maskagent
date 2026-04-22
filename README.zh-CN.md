@@ -131,9 +131,10 @@ node dist/cli.js status
 
 当前调度器说明：
 
-- 现在还是 `serial step queue`
-- 一次只会执行一个 active step
-- 支持多 agent / 多 adapter handoff，但不是并行 worker scheduler
+- 现在是基于 `dependsOn` 的 DAG scheduler
+- 彼此独立、已满足依赖的 step 可以并发执行
+- `mission run`、`mission resume`、`mission restart` 支持 `--max-parallel`
+- 最终 acceptance 仍然是显式 barrier，需要单独执行 `mission accept`
 
 规划行为：
 
@@ -141,6 +142,15 @@ node dist/cli.js status
 - runtime 会先插入一个 `model_plan` step，再进入真正的 worker step
 - `shell` mission 默认仍然直接执行
 - 如果你想显式指定，也可以用 `mission init --plan-first`
+
+并发执行示例：
+
+```bash
+mission run <mission-id> --max-steps 20 --max-parallel 4
+mission resume <mission-id> --run --max-steps 20 --max-parallel 4
+```
+
+现在 `mission status` / guide 页面里也会显示当前 active step 列表和 `maxParallel`。
 
 ## Plan-First 与 ask_user
 

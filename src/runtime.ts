@@ -1377,27 +1377,37 @@ async function validateStep(missionDir: string, step: any, attempt: any, state: 
   return validation;
 }
 
-function nextStep(features: any): any | null {
-  const steps = features.steps || [];
-  const dependenciesPassed = (step: any): boolean =>
-    (step.dependsOn || []).every((dependency: string) => {
-      const match = steps.find((candidate: any) => candidate.stepId === dependency);
-      return (match?.status || "passed") === "passed";
-    });
+function dependenciesPassed(steps: any[], step: any): boolean {
+  return (step.dependsOn || []).every((dependency: string) => {
+    const match = steps.find((candidate: any) => candidate.stepId === dependency);
+    return (match?.status || "passed") === "passed";
+  });
+}
 
-  for (const step of steps) {
-    if (step.type === "acceptance") {
-      continue;
-    }
-    if (
-      ["pending", "failed", "needs_validation"].includes(step.status || "pending") &&
-      dependenciesPassed(step) &&
-      Number(step.attemptCount || 0) < Number(step.retryBudget || 1)
-    ) {
-      return step;
-    }
+function runnableSteps(features: any): any[] {
+  const steps = features.steps || [];
+  return steps.filter(
+    (step: any) =>
+      step.type !== "acceptance" &&
+      ["pending", "failed", "needs_validation", "waiting_user"].includes(step.status || "pending") &&
+      dependenciesPassed(steps, step) &&
+      Number(step.attemptCount || 0) < Number(step.retryBudget || 1),
+  );
+}
+
+function nextQuestionStep(features: any): any | null {
+  return (
+    runnableSteps(features).find((step: any) => step.type === "ask_user" && !String(step.answer || "").trim()) || null
+  );
+}
+
+function syncActiveStepState(state: any): void {
+  state.activeStepIds = Array.isArray(state.activeStepIds) ? [...new Set(state.activeStepIds.filter(Boolean))] : [];
+  if (state.activeStepIds.length) {
+    state.currentStepId = state.activeStepIds[state.activeStepIds.length - 1];
+  } else if (state.phase === "executing" && state.status === "active") {
+    state.currentStepId = null;
   }
-  return null;
 }
 
 function allCorePassed(features: any): boolean {
@@ -1405,11 +1415,149 @@ function allCorePassed(features: any): boolean {
   return Boolean(coreSteps.length) && coreSteps.every((step: any) => ["passed", "skipped"].includes(step.status));
 }
 
+async function executeScheduledStep(
+  missionDir: string,
+  step: any,
+  state: any,
+  features: any,
+): Promise<Record<string, any>> {
+  step.status = "in_progress";
+  step.startedAt ||= now();
+  state.activeStepIds = Array.isArray(state.activeStepIds) ? state.activeStepIds : [];
+  state.activeStepIds.push(step.stepId);
+  state.resumeFrom = step.stepId;
+  state.phase = "executing";
+  syncActiveStepState(state);
+  writeJson(path.join(missionDir, "state.json"), state);
+  writeJson(path.join(missionDir, "features.json"), features);
+  event(missionDir, "worker_selected_feature", {
+    stepId: step.stepId,
+    title: step.title,
+    type: step.type,
+  });
+  event(missionDir, "worker_started", { stepId: step.stepId });
+
+  try {
+    const attempt = await executeWorker(missionDir, step, state, features);
+    const handoffRecord = handoff(missionDir, attempt, step);
+    state.latestAttemptId = attempt.attemptId;
+    state.lastReviewedHandoffCount = fs
+      .readdirSync(path.join(missionDir, "handoffs"))
+      .filter((name) => name.endsWith(".json")).length;
+    writeJson(path.join(missionDir, "state.json"), state);
+
+    if (attempt.status === "paused") {
+      event(missionDir, "worker_paused", { stepId: step.stepId, attemptId: attempt.attemptId });
+      step.status = "pending";
+      writeJson(path.join(missionDir, "features.json"), features);
+      return { stepId: step.stepId, status: "paused" };
+    }
+
+    step.attemptCount = Number(step.attemptCount || 0) + 1;
+    if (attempt.status !== "succeeded") {
+      event(missionDir, "worker_failed", {
+        stepId: step.stepId,
+        attemptId: attempt.attemptId,
+        reason: attempt.failureClass,
+        detail: attempt.failureDetail,
+      });
+      step.status = "failed";
+      step.failureClass = attempt.failureClass;
+      step.failureDetail = attempt.failureDetail;
+      writeJson(path.join(missionDir, "features.json"), features);
+      if (step.attemptCount >= Number(step.retryBudget || 1)) {
+        return { stepId: step.stepId, status: "escalated", reason: "retry_exhausted" };
+      }
+      event(missionDir, "fix_first_queue_reordered", {
+        message: "Reordered the queue after worker failure. Continue mission execution with fix-first sequencing.",
+        stepId: step.stepId,
+      });
+      return {
+        stepId: step.stepId,
+        status: "retryable_failure",
+        ranStep: { stepId: step.stepId, workerStatus: attempt.status },
+      };
+    }
+
+    event(missionDir, "worker_completed", {
+      stepId: step.stepId,
+      attemptId: attempt.attemptId,
+      handoffId: handoffRecord.handoffId,
+    });
+    step.status = "needs_validation";
+    writeJson(path.join(missionDir, "features.json"), features);
+    event(missionDir, "milestone_validation_triggered", {
+      stepId: step.stepId,
+      attemptId: attempt.attemptId,
+    });
+    state.phase = "validating";
+    writeJson(path.join(missionDir, "state.json"), state);
+
+    const validation = await validateStep(missionDir, step, attempt, state);
+    state.latestValidationId = validation.validationId;
+    state.phase = "executing";
+    writeJson(path.join(missionDir, "state.json"), state);
+    event(missionDir, "validator_completed", {
+      stepId: step.stepId,
+      validationId: validation.validationId,
+      result: validation.result,
+      recommendedAction: validation.recommendedAction,
+    });
+
+    if (validation.result === "pass") {
+      step.status = "passed";
+      step.failureClass = null;
+      step.failureDetail = null;
+      step.passedAt = now();
+      writeJson(path.join(missionDir, "features.json"), features);
+      return {
+        stepId: step.stepId,
+        status: "passed",
+        ranStep: {
+          stepId: step.stepId,
+          attemptId: attempt.attemptId,
+          workerStatus: attempt.status,
+          validation: "pass",
+        },
+      };
+    }
+
+    step.status = "failed";
+    step.failureClass = validation.failureClass;
+    step.failureDetail = validation.summary;
+    step.requiredStrategyChange = validation.recommendedAction;
+    writeJson(path.join(missionDir, "features.json"), features);
+    if (validation.recommendedAction === "fix_first" && step.attemptCount < Number(step.retryBudget || 1)) {
+      event(missionDir, "fix_first_queue_reordered", {
+        message: "Reordered the queue after validation failure. Continue mission execution with fix-first sequencing.",
+        stepId: step.stepId,
+      });
+      return {
+        stepId: step.stepId,
+        status: "retryable_failure",
+        ranStep: {
+          stepId: step.stepId,
+          attemptId: attempt.attemptId,
+          workerStatus: attempt.status,
+          validation: validation.result,
+        },
+      };
+    }
+    return { stepId: step.stepId, status: "escalated", reason: validation.result };
+  } finally {
+    state.activeStepIds = (state.activeStepIds || []).filter((entry: string) => entry !== step.stepId);
+    syncActiveStepState(state);
+    writeJson(path.join(missionDir, "state.json"), state);
+    writeJson(path.join(missionDir, "features.json"), features);
+  }
+}
+
 export async function runMission(
   missionDir: string,
   maxSteps = 10,
   resume = false,
   allowStaleLock = false,
+  maxParallel = 4,
 ): Promise<Record<string, any>> {
   layout(missionDir);
   const lockMessage = acquireLock(missionDir, allowStaleLock);
@@ -1430,17 +1578,28 @@ export async function runMission(
     event(missionDir, "mission_run_started", {
       message: "Starting or continuing mission execution",
       resume,
+      maxParallel,
     });
     state.state = "active";
     state.status = "active";
     state.phase = "executing";
+    state.activeStepIds = Array.isArray(state.activeStepIds) ? state.activeStepIds : [];
+    state.maxParallel = maxParallel;
+    syncActiveStepState(state);
     writeJson(path.join(missionDir, "state.json"), state);
 
-    for (let index = 0; index < maxSteps; index += 1) {
-      state = missionState(missionDir);
-      const features = missionFeatures(missionDir);
+    const features = missionFeatures(missionDir);
+    const running = new Map<string, Promise<Record<string, any>>>();
+    let launchedSteps = 0;
+    let pauseOutcome: Record<string, any> | null = null;
+    let escalationOutcome: Record<string, any> | null = null;
 
-      if (fs.existsSync(path.join(missionDir, "pause.requested")) || state.pauseRequested) {
+    while (true) {
+      state.activeStepIds = Array.isArray(state.activeStepIds) ? state.activeStepIds : [];
+      state.maxParallel = maxParallel;
+      writeJson(path.join(missionDir, "state.json"), state);
+
+      if ((fs.existsSync(path.join(missionDir, "pause.requested")) || state.pauseRequested) && !running.size) {
         event(missionDir, "worker_paused", {
           stepId: state.currentStepId,
           attemptId: state.latestAttemptId,
@@ -1455,13 +1614,79 @@ export async function runMission(
         return { ok: true, status: "paused", ranSteps };
       }
 
-      const step = nextStep(features);
-      if (!step) {
+      const blockingQuestion = nextQuestionStep(features);
+      if (blockingQuestion && !running.size) {
+        state.currentStepId = blockingQuestion.stepId;
+        state.resumeFrom = blockingQuestion.stepId;
+        state.state = "waiting_user";
+        state.status = "waiting_user";
+        state.phase = "question";
+        blockingQuestion.status = "waiting_user";
+        syncActiveStepState(state);
+        writeJson(path.join(missionDir, "features.json"), features);
+        writeJson(path.join(missionDir, "state.json"), state);
+        event(missionDir, "mission_question_requested", {
+          stepId: blockingQuestion.stepId,
+          question: blockingQuestion.question || "",
+          reason: blockingQuestion.reason || "",
+        });
+        return {
+          ok: false,
+          status: "waiting_user",
+          stepId: blockingQuestion.stepId,
+          question: blockingQuestion.question || "",
+          reason: blockingQuestion.reason || "",
+          ranSteps,
+        };
+      }
+
+      if (!running.size && escalationOutcome) {
+        state.state = "escalated";
+        state.status = "waiting_human";
+        state.phase = "escalated";
+        state.latestEscalationReason = escalationOutcome.reason;
+        syncActiveStepState(state);
+        writeJson(path.join(missionDir, "state.json"), state);
+        event(missionDir, "mission_escalated", {
+          stepId: escalationOutcome.stepId,
+          reason: escalationOutcome.reason,
+        });
+        return { ok: false, status: "escalated", ranSteps };
+      }
+
+      if (!running.size && allCorePassed(features)) {
+        state.state = "ready";
+        state.status = "active";
+        state.phase = "ready_for_acceptance";
+        state.resumeFrom = "accept";
+        syncActiveStepState(state);
+        writeJson(path.join(missionDir, "state.json"), state);
+        event(missionDir, "mission_ready_for_acceptance");
+        return { ok: true, status: "ready_for_acceptance", ranSteps };
+      }
+
+      const pauseRequested = fs.existsSync(path.join(missionDir, "pause.requested")) || state.pauseRequested;
+      const shouldSchedule = !pauseRequested && !blockingQuestion && !escalationOutcome;
+      while (shouldSchedule && running.size < maxParallel && launchedSteps < maxSteps) {
+        const runnable = runnableSteps(features).filter((step: any) => !running.has(step.stepId));
+        const next = runnable.find((step: any) => !(step.type === "ask_user" && !String(step.answer || "").trim()));
+        if (!next) {
+          break;
+        }
+        launchedSteps += 1;
+        running.set(next.stepId, executeScheduledStep(missionDir, next, state, features));
+      }
+
+      if (!running.size) {
+        if (launchedSteps >= maxSteps) {
+          return { ok: true, status: "max_steps_reached", ranSteps };
+        }
         if (allCorePassed(features)) {
           state.state = "ready";
           state.status = "active";
           state.phase = "ready_for_acceptance";
           state.resumeFrom = "accept";
+          syncActiveStepState(state);
           writeJson(path.join(missionDir, "state.json"), state);
           event(missionDir, "mission_ready_for_acceptance");
           return { ok: true, status: "ready_for_acceptance", ranSteps };
@@ -1469,168 +1694,37 @@ export async function runMission(
         state.state = "blocked";
         state.status = "blocked";
         state.phase = "blocked";
+        syncActiveStepState(state);
         writeJson(path.join(missionDir, "state.json"), state);
         return { ok: false, status: "blocked", message: "No runnable step found", ranSteps };
       }
 
-      if (step.type === "ask_user" && !String(step.answer || "").trim()) {
-        state.currentStepId = step.stepId;
-        state.resumeFrom = step.stepId;
-        state.state = "waiting_user";
-        state.status = "waiting_user";
-        state.phase = "question";
-        step.status = "waiting_user";
-        writeJson(path.join(missionDir, "features.json"), features);
-        writeJson(path.join(missionDir, "state.json"), state);
-        event(missionDir, "mission_question_requested", {
-          stepId: step.stepId,
-          question: step.question || "",
-          reason: step.reason || "",
-        });
-        return {
-          ok: false,
-          status: "waiting_user",
-          stepId: step.stepId,
-          question: step.question || "",
-          reason: step.reason || "",
-          ranSteps,
-        };
+      const settled = await Promise.race(
+        [...running.entries()].map(async ([stepId, promise]) => ({ stepId, result: await promise })),
+      );
+      running.delete(settled.stepId);
+
+      if (settled.result.ranStep) {
+        ranSteps.push(settled.result.ranStep);
       }
-
-      step.status = "in_progress";
-      step.startedAt ||= now();
-      state.currentStepId = step.stepId;
-      state.resumeFrom = step.stepId;
-      state.phase = "executing";
-      writeJson(path.join(missionDir, "state.json"), state);
-      writeJson(path.join(missionDir, "features.json"), features);
-      event(missionDir, "worker_selected_feature", {
-        stepId: step.stepId,
-        title: step.title,
-        type: step.type,
-      });
-      event(missionDir, "worker_started", { stepId: step.stepId });
-
-      const attempt = await executeWorker(missionDir, step, state, features);
-      const handoffRecord = handoff(missionDir, attempt, step);
-      state.latestAttemptId = attempt.attemptId;
-      state.lastReviewedHandoffCount = fs.readdirSync(path.join(missionDir, "handoffs")).filter((name) => name.endsWith(".json")).length;
-      writeJson(path.join(missionDir, "state.json"), state);
-
-      if (attempt.status === "paused") {
-        event(missionDir, "worker_paused", { stepId: step.stepId, attemptId: attempt.attemptId });
-        step.status = "pending";
-        writeJson(path.join(missionDir, "features.json"), features);
+      if (settled.result.status === "paused") {
+        pauseOutcome = settled.result;
+      }
+      if (settled.result.status === "escalated" && !escalationOutcome) {
+        escalationOutcome = settled.result;
+      }
+      if (pauseOutcome && !running.size) {
         state.pauseRequested = false;
         state.state = "paused";
         state.status = "paused";
         state.phase = "paused";
-        state.resumeFrom = step.stepId;
+        state.resumeFrom = pauseOutcome.stepId || state.resumeFrom;
+        syncActiveStepState(state);
         writeJson(path.join(missionDir, "state.json"), state);
         event(missionDir, "mission_paused", { resumeFrom: state.resumeFrom });
         return { ok: true, status: "paused", ranSteps };
       }
-
-      step.attemptCount = Number(step.attemptCount || 0) + 1;
-      if (attempt.status !== "succeeded") {
-        event(missionDir, "worker_failed", {
-          stepId: step.stepId,
-          attemptId: attempt.attemptId,
-          reason: attempt.failureClass,
-          detail: attempt.failureDetail,
-        });
-        step.status = "failed";
-        step.failureClass = attempt.failureClass;
-        step.failureDetail = attempt.failureDetail;
-        writeJson(path.join(missionDir, "features.json"), features);
-        if (step.attemptCount >= Number(step.retryBudget || 1)) {
-          state.state = "escalated";
-          state.status = "waiting_human";
-          state.phase = "escalated";
-          state.latestEscalationReason = "retry_exhausted";
-          writeJson(path.join(missionDir, "state.json"), state);
-          event(missionDir, "mission_escalated", { stepId: step.stepId, reason: "retry_exhausted" });
-          return { ok: false, status: "escalated", ranSteps };
-        }
-        event(missionDir, "fix_first_queue_reordered", {
-          message: "Reordered the queue after worker failure. Continue mission execution with fix-first sequencing.",
-          stepId: step.stepId,
-        });
-        ranSteps.push({ stepId: step.stepId, workerStatus: attempt.status });
-        continue;
-      }
-
-      event(missionDir, "worker_completed", {
-        stepId: step.stepId,
-        attemptId: attempt.attemptId,
-        handoffId: handoffRecord.handoffId,
-      });
-      step.status = "needs_validation";
-      writeJson(path.join(missionDir, "features.json"), features);
-      event(missionDir, "milestone_validation_triggered", {
-        stepId: step.stepId,
-        attemptId: attempt.attemptId,
-      });
-      state.phase = "validating";
-      writeJson(path.join(missionDir, "state.json"), state);
-
-      const validation = await validateStep(missionDir, step, attempt, state);
-      state.latestValidationId = validation.validationId;
-      state.phase = "executing";
-      writeJson(path.join(missionDir, "state.json"), state);
-      event(missionDir, "validator_completed", {
-        stepId: step.stepId,
-        validationId: validation.validationId,
-        result: validation.result,
-        recommendedAction: validation.recommendedAction,
-      });
-
-      if (validation.result === "pass") {
-        step.status = "passed";
-        step.failureClass = null;
-        step.failureDetail = null;
-        step.passedAt = now();
-        writeJson(path.join(missionDir, "features.json"), features);
-        ranSteps.push({
-          stepId: step.stepId,
-          attemptId: attempt.attemptId,
-          workerStatus: attempt.status,
-          validation: "pass",
-        });
-        continue;
-      }
-
-      step.status = "failed";
-      step.failureClass = validation.failureClass;
-      step.failureDetail = validation.summary;
-      step.requiredStrategyChange = validation.recommendedAction;
-      writeJson(path.join(missionDir, "features.json"), features);
-      if (
-        validation.recommendedAction === "fix_first" &&
-        step.attemptCount < Number(step.retryBudget || 1)
-      ) {
-        event(missionDir, "fix_first_queue_reordered", {
-          message: "Reordered the queue after validation failure. Continue mission execution with fix-first sequencing.",
-          stepId: step.stepId,
-        });
-        ranSteps.push({
-          stepId: step.stepId,
-          attemptId: attempt.attemptId,
-          workerStatus: attempt.status,
-          validation: validation.result,
-        });
-        continue;
-      }
-      state.state = "escalated";
-      state.status = "waiting_human";
-      state.phase = "escalated";
-      state.latestEscalationReason = validation.result;
-      writeJson(path.join(missionDir, "state.json"), state);
-      event(missionDir, "mission_escalated", { stepId: step.stepId, reason: validation.result });
-      return { ok: false, status: "escalated", ranSteps };
     }
-
-    return { ok: true, status: "max_steps_reached", ranSteps };
   } finally {
     releaseLock(missionDir);
   }
@@ -1701,6 +1795,8 @@ export function statusObject(missionDir: string): Record<string, any> {
     latestValidationId: state.latestValidationId,
     lastReviewedHandoffCount: state.lastReviewedHandoffCount,
     resumeFrom: state.resumeFrom,
+    activeStepIds: state.activeStepIds || [],
+    maxParallel: state.maxParallel || 4,
     steps: (features.steps || []).map((entry: any) => ({
       stepId: entry.stepId,
       title: entry.title,
@@ -1772,6 +1868,8 @@ export function createMission(options: InitOptions): Record<string, any> {
     latestValidationId: null,
     lastReviewedHandoffCount: 0,
     resumeFrom: "run",
+    activeStepIds: [],
+    maxParallel: 4,
     pauseRequested: false,
     createdAt: now(),
     updatedAt: now(),
@@ -1960,6 +2058,7 @@ export async function resumeMission(
   missionDir: string,
   run = false,
   maxSteps = 10,
+  maxParallel = 4,
 ): Promise<Record<string, any>> {
   fs.rmSync(path.join(missionDir, "pause.requested"), { force: true });
   const state = missionState(missionDir);
@@ -1967,21 +2066,26 @@ export async function resumeMission(
   state.state = "active";
   state.status = "active";
   state.phase = "executing";
+  state.activeStepIds = Array.isArray(state.activeStepIds) ? state.activeStepIds : [];
+  state.maxParallel = maxParallel;
+  syncActiveStepState(state);
   writeJson(path.join(missionDir, "state.json"), state);
   event(missionDir, "mission_resumed", {
     resumeWorkerSessionId: state.latestAttemptId,
     resumeFrom: state.resumeFrom,
+    maxParallel,
   });
   if (!run) {
     return { ok: true, status: "resumed", resumeFrom: state.resumeFrom };
   }
-  return await runMission(missionDir, maxSteps, true, true);
+  return await runMission(missionDir, maxSteps, true, true, maxParallel);
 }
 
 export async function restartMission(
   missionDir: string,
   run = false,
   maxSteps = 10,
+  maxParallel = 4,
 ): Promise<Record<string, any>> {
   releaseLock(missionDir);
   fs.rmSync(path.join(missionDir, "pause.requested"), { force: true });
@@ -1990,6 +2094,9 @@ export async function restartMission(
   state.state = "active";
   state.status = "active";
   state.phase = "executing";
+  state.activeStepIds = [];
+  state.maxParallel = maxParallel;
+  syncActiveStepState(state);
   writeJson(path.join(missionDir, "state.json"), state);
   const features = missionFeatures(missionDir);
   const current = (features.steps || []).find((entry: any) => entry.stepId === state.currentStepId);
@@ -2006,11 +2113,12 @@ export async function restartMission(
   event(missionDir, "mission_run_started", {
     message: "Restarting mission from scratch",
     restart: true,
+    maxParallel,
   });
   if (!run) {
     return { ok: true, status: "restarted", resumeFrom: state.resumeFrom };
   }
-  return await runMission(missionDir, maxSteps, false, true);
+  return await runMission(missionDir, maxSteps, false, true, maxParallel);
 }
 
 export function abortMission(missionDir: string, reason?: string | null): Record<string, any> {

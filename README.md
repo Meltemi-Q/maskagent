@@ -131,9 +131,10 @@ If you do not want to write flags by hand, run `mission` and follow the guide to
 
 Current scheduler behavior:
 
-- the runtime is still a `serial step queue`
-- only one active step runs at a time
-- it supports multi-agent / multi-adapter handoff, but not parallel worker execution yet
+- the runtime now schedules a DAG of steps using `dependsOn`
+- independent runnable steps can execute concurrently
+- `mission run`, `mission resume`, and `mission restart` support `--max-parallel`
+- final mission acceptance is still an explicit barrier via `mission accept`
 
 Planning behavior:
 
@@ -141,6 +142,15 @@ Planning behavior:
 - the runtime inserts a `model_plan` step ahead of the main worker step
 - `shell` missions stay direct by default
 - you can still force planning explicitly with `mission init --plan-first`
+
+Parallel execution example:
+
+```bash
+mission run <mission-id> --max-steps 20 --max-parallel 4
+mission resume <mission-id> --run --max-steps 20 --max-parallel 4
+```
+
+Status output now includes active step ids and the current max parallel setting.
 
 ## Planning And ask_user
 

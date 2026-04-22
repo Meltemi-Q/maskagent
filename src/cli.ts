@@ -53,12 +53,14 @@ function acceptanceSummary(result: any): string {
 }
 
 function humanStatus(value: any): string {
+  const activeSteps = Array.isArray(value.activeStepIds) ? value.activeStepIds.filter(Boolean) : [];
   const lines = [
     `Mission: ${value.missionId} — ${value.name}`,
     `Dir:     ${value.missionDir}`,
     `State:   ${value.state} / ${value.phase} / ${value.status}`,
     `Current: ${value.resumeFrom} latestAttempt=${value.latestAttemptId} latestValidation=${value.latestValidationId}`,
     `Locked:  ${value.locked} pauseRequested=${value.pauseRequested}`,
+    `Active:  ${activeSteps.length ? activeSteps.join(", ") : "none"} maxParallel=${value.maxParallel ?? 4}`,
     "Steps:",
     ...(value.steps || []).map(
       (step: any) =>
@@ -550,7 +552,8 @@ async function guideMissionActionMenu(rl: PromptSession, missionDir: string): Pr
     }
     if (action === "run") {
       const maxSteps = await promptNumber(rl, "max steps", { defaultValue: 10, min: 1 });
-      print(statusSummary(await runMission(missionDir, maxSteps, false, false)));
+      const maxParallel = await promptNumber(rl, "max parallel", { defaultValue: 4, min: 1 });
+      print(statusSummary(await runMission(missionDir, maxSteps, false, false, maxParallel)));
       continue;
     }
     if (action === "answer") {
@@ -581,13 +584,15 @@ async function guideMissionActionMenu(rl: PromptSession, missionDir: string): Pr
     }
     if (action === "resume") {
       const maxSteps = await promptNumber(rl, "max steps", { defaultValue: 10, min: 1 });
-      const result = await resumeMission(missionDir, true, maxSteps);
+      const maxParallel = await promptNumber(rl, "max parallel", { defaultValue: 4, min: 1 });
+      const result = await resumeMission(missionDir, true, maxSteps, maxParallel);
       print(`resumed: ${result.status} resumeFrom=${result.resumeFrom}`);
       continue;
     }
     if (action === "restart") {
       const maxSteps = await promptNumber(rl, "max steps", { defaultValue: 10, min: 1 });
-      const result = await restartMission(missionDir, true, maxSteps);
+      const maxParallel = await promptNumber(rl, "max parallel", { defaultValue: 4, min: 1 });
+      const result = await restartMission(missionDir, true, maxSteps, maxParallel);
       print(`restart: ${result.status} resumeFrom=${result.resumeFrom}`);
       continue;
     }
@@ -630,7 +635,7 @@ async function runGuide(): Promise<number> {
     while (true) {
       print("MaskAgent");
       print(`Mission home:    ${homeDir()}`);
-      print("Execution mode: serial step queue");
+      print("Execution mode: DAG scheduler (parallel-ready, default max parallel 4)");
       for (const line of guideSettingsSummary(settings)) {
         print(line);
       }
@@ -782,6 +787,7 @@ async function run(argv: string[]): Promise<number> {
     program
       .command("run")
       .option("--max-steps <maxSteps>", "", "10")
+      .option("--max-parallel <maxParallel>", "", "4")
       .option("--resume")
       .option("--allow-stale-lock")
       .action(async (mission, options) => {
@@ -790,6 +796,7 @@ async function run(argv: string[]): Promise<number> {
           Number(options.maxSteps),
           Boolean(options.resume),
           Boolean(options.allowStaleLock),
+          Number(options.maxParallel),
         );
         if (options.json) {
           printJson(result);
@@ -829,8 +836,14 @@ async function run(argv: string[]): Promise<number> {
       .command("resume")
       .option("--run")
       .option("--max-steps <maxSteps>", "", "10")
+      .option("--max-parallel <maxParallel>", "", "4")
       .action(async (mission, options) => {
-        const result = await resumeMission(resolveMissionDir(mission), Boolean(options.run), Number(options.maxSteps));
+        const result = await resumeMission(
+          resolveMissionDir(mission),
+          Boolean(options.run),
+          Number(options.maxSteps),
+          Number(options.maxParallel),
+        );
         if (options.json) {
           printJson(result);
         } else {
@@ -845,8 +858,14 @@ async function run(argv: string[]): Promise<number> {
       .command("restart")
       .option("--run")
       .option("--max-steps <maxSteps>", "", "10")
+      .option("--max-parallel <maxParallel>", "", "4")
       .action(async (mission, options) => {
-        const result = await restartMission(resolveMissionDir(mission), Boolean(options.run), Number(options.maxSteps));
+        const result = await restartMission(
+          resolveMissionDir(mission),
+          Boolean(options.run),
+          Number(options.maxSteps),
+          Number(options.maxParallel),
+        );
         if (options.json) {
           printJson(result);
         } else {

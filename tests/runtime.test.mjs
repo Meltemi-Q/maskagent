@@ -492,6 +492,68 @@ test("ask_user step waits for answer and resumes", async (t) => {
   assert.equal(fs.readFileSync(path.join(fixture.workspace, "marker.txt"), "utf8"), "ok");
 });
 
+test("parallel dag scheduler runs independent steps concurrently", async (t) => {
+  const fixture = tempFixture();
+  t.after(() => fixture.cleanup());
+  const { main } = await loadCli();
+  const primaryCommand = `${process.execPath} -e "const fs=require('node:fs');fs.writeFileSync('primary-start.txt', String(Date.now()));setTimeout(()=>fs.writeFileSync('primary.txt','ok\\n'), 1200)"`;
+  const sideCommand = `${process.execPath} -e "const fs=require('node:fs');fs.writeFileSync('side-start.txt', String(Date.now()));setTimeout(()=>fs.writeFileSync('side.txt','ok\\n'), 1200)"`;
+  assert.equal(
+    await main([
+      "init",
+      "--name",
+      "parallel-dag",
+      "--goal",
+      "run two independent shell steps in parallel",
+      "--workspace",
+      fixture.workspace,
+      "--step-command",
+      primaryCommand,
+      "--validate",
+      "test -f primary.txt",
+      "--accept",
+      "test -f primary.txt",
+    ]),
+    0,
+  );
+  const md = missionDir(fixture);
+  assert.equal(
+    await main([
+      "step",
+      "add",
+      path.basename(md),
+      "--type",
+      "shell",
+      "--step-id",
+      "step-side",
+      "--title",
+      "Run side shell worker",
+      "--command",
+      sideCommand,
+      "--validate",
+      "test -f side.txt",
+    ]),
+    0,
+  );
+  const featuresPath = path.join(md, "features.json");
+  const features = readJson(featuresPath);
+  const acceptance = features.steps.find((entry) => entry.stepId === "step-acceptance");
+  acceptance.dependsOn = ["step-shell", "step-side"];
+  writeJson(featuresPath, features);
+
+  assert.equal(
+    await main(["run", path.basename(md), "--max-steps", "10", "--max-parallel", "2"]),
+    0,
+  );
+  assert.equal(await main(["accept", path.basename(md)]), 0);
+  const primaryStart = Number(fs.readFileSync(path.join(fixture.workspace, "primary-start.txt"), "utf8"));
+  const sideStart = Number(fs.readFileSync(path.join(fixture.workspace, "side-start.txt"), "utf8"));
+  assert.ok(Math.abs(primaryStart - sideStart) < 700, `expected near-simultaneous start, got ${Math.abs(primaryStart - sideStart)}ms`);
+  const status = readJson(path.join(md, "state.json"));
+  assert.equal(status.maxParallel, 2);
+  assert.deepEqual(new Set(status.activeStepIds || []), new Set());
+});
+
 test("interactive guide can create run and accept a shell mission", async (t) => {
   const fixture = tempFixture();
   t.after(() => fixture.cleanup());
@@ -508,6 +570,7 @@ test("interactive guide can create run and accept a shell mission", async (t) =>
     "",
     "y",
     "10",
+    "4",
     "y",
     "5",
   ].join("\n") + "\n";
