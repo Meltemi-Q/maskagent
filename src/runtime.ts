@@ -607,6 +607,53 @@ function workerPrompt(state: any, step: any, missionMd: string, retry: any): str
   ].join("\n");
 }
 
+function modelPlanPrompt(state: any, step: any, missionMd: string, retry: any): string {
+  const schema = {
+    summary: "short plan summary",
+    steps: [
+      {
+        title: "step title",
+        objective: "what this step should accomplish",
+        owner: "worker|validator|orchestrator",
+        dependsOn: ["optional-step-id"],
+      },
+    ],
+    questions: [
+      {
+        question: "only ask when missing info would materially change implementation",
+        reason: "why this blocks or materially changes the result",
+      },
+    ],
+    risks: ["optional list of risks or assumptions"],
+  };
+  return [
+    "You are the planner of a mission orchestration runtime.",
+    "Create an execution plan first. Prefer returning one strict JSON object matching the preferred schema below.",
+    "Ask the user only when the missing information would materially change architecture, target behavior, acceptance, credentials, or workspace boundaries.",
+    "Do not ask for cosmetic preferences, low-impact naming choices, or details the worker can infer safely.",
+    "# Preferred JSON schema",
+    JSON.stringify(schema, null, 2),
+    "# Mission",
+    missionMd.slice(0, 12000),
+    "# Runtime state",
+    JSON.stringify(
+      {
+        missionId: state.missionId,
+        phase: state.phase,
+        status: state.status,
+        resumeFrom: state.resumeFrom,
+        workingDirectory: state.workingDirectory,
+      },
+      null,
+      2,
+    ),
+    "# Planning step",
+    JSON.stringify(step, null, 2),
+    "# Retry context",
+    JSON.stringify(retry, null, 2),
+  ].join("\n");
+}
+
 function llmWorkerPrompt(state: any, step: any, missionMd: string, retry: any): string {
   const schema = {
     status: "succeeded|partial|failed|blocked",
@@ -702,6 +749,76 @@ function extractJsonObject(text: string): Record<string, any> | null {
     }
   }
   return null;
+}
+
+function nextQuestionStepId(features: any): string {
+  const existing = new Set((features.steps || []).map((entry: any) => entry.stepId));
+  let index = 1;
+  while (true) {
+    const candidate = `step-ask-${String(index).padStart(3, "0")}`;
+    if (!existing.has(candidate)) {
+      return candidate;
+    }
+    index += 1;
+  }
+}
+
+function syncPlanQuestions(features: any, planStepId: string, payload: any): string[] {
+  const questions = Array.isArray(payload?.questions)
+    ? payload.questions.filter(
+        (entry: any) => entry && typeof entry === "object" && String(entry.question || "").trim(),
+      )
+    : [];
+  const steps = features.steps || (features.steps = []);
+  const generatedIds = new Set(
+    steps.filter((entry: any) => entry.generatedByStepId === planStepId).map((entry: any) => entry.stepId),
+  );
+
+  if (generatedIds.size) {
+    features.steps = steps.filter((entry: any) => !generatedIds.has(entry.stepId));
+    for (const step of features.steps) {
+      if (!Array.isArray(step.dependsOn)) {
+        continue;
+      }
+      step.dependsOn = step.dependsOn.map((dependency: string) => (generatedIds.has(dependency) ? planStepId : dependency));
+    }
+  }
+
+  if (!questions.length) {
+    return [];
+  }
+
+  const downstream = (features.steps || []).filter(
+    (entry: any) => entry.stepId !== planStepId && (entry.dependsOn || []).includes(planStepId),
+  );
+  const insertedIds: string[] = [];
+  let previous = planStepId;
+  for (const entry of questions) {
+    const stepId = nextQuestionStepId(features);
+    insertedIds.push(stepId);
+    features.steps.push({
+      stepId,
+      title: `Ask user: ${String(entry.question).slice(0, 72)}`,
+      objective: entry.reason || entry.question,
+      type: "ask_user",
+      status: "pending",
+      owner: "orchestrator",
+      attemptCount: 0,
+      retryBudget: 1,
+      dependsOn: [previous],
+      question: String(entry.question).trim(),
+      reason: entry.reason ? String(entry.reason).trim() : "",
+      generatedByStepId: planStepId,
+    });
+    previous = stepId;
+  }
+
+  for (const step of downstream) {
+    const dependencies = Array.isArray(step.dependsOn) ? [...step.dependsOn] : [];
+    step.dependsOn = dependencies.map((dependency: string) => (dependency === planStepId ? previous : dependency));
+  }
+
+  return insertedIds;
 }
 
 function workspaceTarget(workspaceDir: string, relativePath: string): string {
@@ -832,7 +949,7 @@ async function gitSummary(workspaceDir: string): Promise<Record<string, any>> {
   };
 }
 
-async function executeWorker(missionDir: string, step: any, state: any): Promise<Record<string, any>> {
+async function executeWorker(missionDir: string, step: any, state: any, features?: any): Promise<Record<string, any>> {
   const attemptId = mid("attempt");
   const workspaceDir = path.resolve(expandHome(state.workingDirectory || "."));
   const pauseFile = path.join(missionDir, "pause.requested");
@@ -938,29 +1055,107 @@ async function executeWorker(missionDir: string, step: any, state: any): Promise
         }
       }
     } else if (type === "model_plan") {
-      const response = await callAdapter(
-        missionDir,
-        step.adapterRef || step.adapterId,
-        workerPrompt(state, step, missionMd, {}),
-        "worker",
-      );
-      const evidencePath = path.join(missionDir, "evidence", `${attemptId}-model-plan.md`);
-      fs.writeFileSync(evidencePath, response.content, "utf8");
-      refs.push(path.relative(missionDir, evidencePath));
-      actions.push({
-        kind: "model_call",
-        adapterId: response.adapterId,
-        model: response.model,
-        workerMode: "plan_only",
+      const prompt = modelPlanPrompt(state, step, missionMd, {
+        attemptCount: step.attemptCount || 0,
+        previousFailureClass: step.failureClass,
       });
-      if (response.content.trim()) {
-        status = "succeeded";
-        summary = shortText(response.content, 1500);
+      let response: Record<string, any>;
+      if (step.commandTemplate || step.command) {
+        const promptPath = path.join(missionDir, "evidence", `${attemptId}-plan-prompt.md`);
+        fs.writeFileSync(promptPath, prompt, "utf8");
+        refs.push(path.relative(missionDir, promptPath));
+        const command = formatTemplate(step.commandTemplate || step.command || "", {
+          prompt_file: shellQuote(promptPath),
+          prompt: shellQuote(prompt),
+          raw_prompt: prompt,
+          workspace: shellQuote(workspaceDir),
+          mission_dir: shellQuote(missionDir),
+        });
+        const result = await runShell(command, workspaceDir, Number(step.timeoutSeconds || 1800), pauseFile);
+        refs.push(...writeCommandEvidence(missionDir, `${attemptId}-model-plan`, result));
+        actions.push({
+          kind: "external_cli_plan",
+          commandTemplate: step.commandTemplate || step.command,
+          exitCode: result.exitCode,
+        });
+        if (result.paused) {
+          status = "paused";
+          failureClass = "pause_requested";
+          summary = "Planning paused by operator request";
+          response = { content: "" };
+        } else if (result.exitCode === 0) {
+          response = { content: result.stdout || result.stderr || "Planner completed successfully." };
+        } else {
+          throw new Error(`${result.timedOut ? "environment_error" : "tool_error"}:planner exited ${result.exitCode}`);
+        }
       } else {
-        failureClass = "no_effect_change";
-        failureDetail = "empty model response";
+        response = await callAdapter(
+          missionDir,
+          step.adapterRef || step.adapterId,
+          prompt,
+          "worker",
+        );
+        actions.push({
+          kind: "model_call",
+          adapterId: response.adapterId,
+          model: response.model,
+          workerMode: "plan_only",
+        });
+      }
+
+      if (status !== "paused") {
+        const evidencePath = path.join(missionDir, "evidence", `${attemptId}-model-plan.md`);
+        fs.writeFileSync(evidencePath, response.content || "", "utf8");
+        refs.push(path.relative(missionDir, evidencePath));
+        if ((response.content || "").trim()) {
+          const payload = extractJsonObject(response.content || "");
+          if (payload) {
+            const parsedPath = path.join(missionDir, "evidence", `${attemptId}-model-plan.json`);
+            writeJson(parsedPath, payload);
+            refs.push(path.relative(missionDir, parsedPath));
+            if (features) {
+              const insertedQuestions = syncPlanQuestions(features, step.stepId, payload);
+              if (insertedQuestions.length) {
+                actions.push({ kind: "plan_questions", stepIds: insertedQuestions });
+              }
+            }
+            summary = shortText(String(payload.summary || response.content), 1500);
+          } else {
+            summary = shortText(response.content, 1500);
+          }
+          status = "succeeded";
+        } else {
+          failureClass = "no_effect_change";
+          failureDetail = "empty model response";
+          summary = failureDetail;
+          issues.push(failureDetail);
+        }
+      }
+    } else if (type === "ask_user") {
+      const question = String(step.question || "").trim();
+      const answer = String(step.answer || "").trim();
+      if (!question) {
+        failureClass = "invalid_worker_output";
+        failureDetail = "missing ask_user question";
         summary = failureDetail;
         issues.push(failureDetail);
+      } else if (!answer) {
+        failureClass = "needs_user_input";
+        failureDetail = question;
+        summary = question;
+      } else {
+        const evidencePath = path.join(missionDir, "evidence", `${attemptId}-ask-user.json`);
+        writeJson(evidencePath, {
+          stepId: step.stepId,
+          question,
+          reason: step.reason || "",
+          answer,
+          answeredAt: step.answeredAt || now(),
+        });
+        refs.push(path.relative(missionDir, evidencePath));
+        actions.push({ kind: "ask_user_answer", question, answer });
+        status = "succeeded";
+        summary = `User answered: ${shortText(answer, 400)}`;
       }
     } else if (type === "noop" || type === "manual") {
       const evidencePath = path.join(missionDir, "evidence", `${attemptId}-noop.txt`);
@@ -1278,6 +1473,30 @@ export async function runMission(
         return { ok: false, status: "blocked", message: "No runnable step found", ranSteps };
       }
 
+      if (step.type === "ask_user" && !String(step.answer || "").trim()) {
+        state.currentStepId = step.stepId;
+        state.resumeFrom = step.stepId;
+        state.state = "waiting_user";
+        state.status = "waiting_user";
+        state.phase = "question";
+        step.status = "waiting_user";
+        writeJson(path.join(missionDir, "features.json"), features);
+        writeJson(path.join(missionDir, "state.json"), state);
+        event(missionDir, "mission_question_requested", {
+          stepId: step.stepId,
+          question: step.question || "",
+          reason: step.reason || "",
+        });
+        return {
+          ok: false,
+          status: "waiting_user",
+          stepId: step.stepId,
+          question: step.question || "",
+          reason: step.reason || "",
+          ranSteps,
+        };
+      }
+
       step.status = "in_progress";
       step.startedAt ||= now();
       state.currentStepId = step.stepId;
@@ -1292,7 +1511,7 @@ export async function runMission(
       });
       event(missionDir, "worker_started", { stepId: step.stepId });
 
-      const attempt = await executeWorker(missionDir, step, state);
+      const attempt = await executeWorker(missionDir, step, state, features);
       const handoffRecord = handoff(missionDir, attempt, step);
       state.latestAttemptId = attempt.attemptId;
       state.lastReviewedHandoffCount = fs.readdirSync(path.join(missionDir, "handoffs")).filter((name) => name.endsWith(".json")).length;
@@ -1491,6 +1710,9 @@ export function statusObject(missionDir: string): Record<string, any> {
       retryBudget: entry.retryBudget,
       failureClass: entry.failureClass,
       failureDetail: entry.failureDetail,
+      question: entry.question,
+      answer: entry.answer,
+      reason: entry.reason,
     })),
     validationState,
     locked: fs.existsSync(path.join(missionDir, "run.lock")),
@@ -1563,9 +1785,13 @@ export function createMission(options: InitOptions): Record<string, any> {
     required: true,
   }));
 
-  let step: any;
+  const planFirst = options.planOnly
+    ? true
+    : options.planFirst ?? Boolean((options.workerCommand || options.adapterId) && !options.stepCommand);
+
+  let workerStep: any = null;
   if (options.workerCommand) {
-    step = {
+    workerStep = {
       stepId: "step-worker",
       title: "Run external CLI worker",
       objective: options.goal,
@@ -1578,7 +1804,7 @@ export function createMission(options: InitOptions): Record<string, any> {
       checks: validationChecks,
     };
   } else if (options.stepCommand) {
-    step = {
+    workerStep = {
       stepId: "step-shell",
       title: options.stepTitle || "Run shell worker command",
       objective: options.goal,
@@ -1592,7 +1818,7 @@ export function createMission(options: InitOptions): Record<string, any> {
     };
   } else {
     const defaultType = options.planOnly && options.adapterId ? "model_plan" : options.adapterId ? "llm_worker" : "noop";
-    step = {
+    workerStep = {
       stepId: "step-worker",
       title: defaultType === "llm_worker" ? "Run LLM JSON worker" : "Create execution plan / handoff",
       objective: options.goal,
@@ -1607,7 +1833,40 @@ export function createMission(options: InitOptions): Record<string, any> {
     };
   }
 
-  const steps = [step];
+  let planStep: any = null;
+  if (planFirst && workerStep && workerStep.type !== "shell" && workerStep.type !== "noop") {
+    planStep = {
+      stepId: "step-plan",
+      title: "Create execution plan",
+      objective: `Plan how to execute: ${options.goal}`,
+      type: "model_plan",
+      status: "pending",
+      owner: "orchestrator",
+      attemptCount: 0,
+      retryBudget: 1,
+    };
+    if (options.adapterId) {
+      planStep.adapterRef = options.adapterId;
+    }
+    if (options.workerCommand) {
+      planStep.commandTemplate = options.workerCommand;
+    }
+  }
+
+  const steps = [];
+  if (planStep) {
+    steps.push(planStep);
+  }
+  if (!options.planOnly && workerStep) {
+    if (planStep) {
+      workerStep.dependsOn = [planStep.stepId];
+    }
+    steps.push(workerStep);
+  } else if (!steps.length && workerStep) {
+    steps.push(workerStep);
+  }
+
+  const acceptanceDependency = (!options.planOnly && workerStep?.stepId) || planStep?.stepId || workerStep?.stepId;
   if (acceptanceChecks.length) {
     steps.push({
       stepId: "step-acceptance",
@@ -1618,7 +1877,7 @@ export function createMission(options: InitOptions): Record<string, any> {
       owner: "validator",
       attemptCount: 0,
       retryBudget: 1,
-      dependsOn: [step.stepId],
+      dependsOn: acceptanceDependency ? [acceptanceDependency] : [],
       checks: acceptanceChecks,
     });
   }
@@ -1814,6 +2073,16 @@ export function addStep(missionDir: string, options: Record<string, any>): Recor
   if (options.allowModelCommands) {
     step.allowModelCommands = true;
   }
+  if (options.question) {
+    step.question = options.question;
+  }
+  if (options.reason) {
+    step.reason = options.reason;
+  }
+  if (options.answer) {
+    step.answer = options.answer;
+    step.answeredAt = now();
+  }
   features.steps ||= [];
   features.steps.push(step);
   writeJson(path.join(missionDir, "features.json"), features);
@@ -1822,6 +2091,37 @@ export function addStep(missionDir: string, options: Record<string, any>): Recor
   validationState.assertions[stepId] = { status: "pending", updatedAt: now() };
   writeJson(path.join(missionDir, "validation-state.json"), validationState);
   return { ok: true, step };
+}
+
+export function answerStepQuestion(missionDir: string, stepId: string, response: string): Record<string, any> {
+  const features = missionFeatures(missionDir);
+  const step = (features.steps || []).find((entry: any) => entry.stepId === stepId);
+  if (!step) {
+    throw new Error(`step not found: ${stepId}`);
+  }
+  if (step.type !== "ask_user") {
+    throw new Error(`step is not ask_user: ${stepId}`);
+  }
+  step.answer = response;
+  step.answeredAt = now();
+  step.status = "pending";
+  step.failureClass = null;
+  step.failureDetail = null;
+  writeJson(path.join(missionDir, "features.json"), features);
+
+  const state = missionState(missionDir);
+  if (state.currentStepId === stepId || state.status === "waiting_user") {
+    state.state = "active";
+    state.status = "active";
+    state.phase = "executing";
+    state.resumeFrom = stepId;
+    writeJson(path.join(missionDir, "state.json"), state);
+  }
+  event(missionDir, "mission_question_answered", {
+    stepId,
+    responsePreview: shortText(response, 400),
+  });
+  return { ok: true, stepId, response };
 }
 
 export function addAdapter(missionDir: string, options: Record<string, any>): Record<string, any> {

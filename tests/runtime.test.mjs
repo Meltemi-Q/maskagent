@@ -44,6 +44,10 @@ function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8"));
 }
 
+function writeJson(filePath, data) {
+  fs.writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
+}
+
 function fakeServer(handler) {
   const server = http.createServer(handler);
   return new Promise((resolve) => {
@@ -119,7 +123,10 @@ test("layout and secret policy", async (t) => {
   assert.match(registryText, /FAKE_API_KEY/);
   assert.doesNotMatch(registryText, /sk-/);
   assert.ok(readJson(path.join(md, "state.json")).lastReviewedHandoffCount !== undefined);
-  assert.equal(readJson(path.join(md, "features.json")).steps[0].type, "llm_worker");
+  const steps = readJson(path.join(md, "features.json")).steps;
+  assert.equal(steps[0].type, "model_plan");
+  assert.equal(steps[1].type, "llm_worker");
+  assert.deepEqual(steps[1].dependsOn, ["step-plan"]);
 });
 
 test("default home is .maskagent not .factory", async (t) => {
@@ -412,6 +419,77 @@ test("fake openai and anthropic adapters", async (t) => {
   );
   assert.equal(await main(["adapters", "test", path.basename(md), "fake-anthropic"]), 0);
   assert.doesNotMatch(fs.readFileSync(path.join(md, "worker-transcripts.jsonl"), "utf8"), /fake-token-not-written/);
+});
+
+test("ask_user step waits for answer and resumes", async (t) => {
+  const fixture = tempFixture();
+  t.after(() => fixture.cleanup());
+  const { main } = await loadCli();
+  assert.equal(
+    await main([
+      "init",
+      "--name",
+      "ask-user",
+      "--goal",
+      "wait for user answer before shell step",
+      "--workspace",
+      fixture.workspace,
+      "--step-command",
+      "printf ok > marker.txt",
+      "--validate",
+      "test -f marker.txt",
+      "--accept",
+      "grep -q ok marker.txt",
+    ]),
+    0,
+  );
+  const md = missionDir(fixture);
+  assert.equal(
+    await main([
+      "step",
+      "add",
+      path.basename(md),
+      "--type",
+      "ask_user",
+      "--step-id",
+      "step-ask",
+      "--title",
+      "Need confirmation",
+      "--question",
+      "Which environment should this target?",
+      "--reason",
+      "The implementation needs the target environment before continuing.",
+    ]),
+    0,
+  );
+  const featuresPath = path.join(md, "features.json");
+  const features = readJson(featuresPath);
+  const stepShell = features.steps.find((entry) => entry.stepId === "step-shell");
+  const acceptance = features.steps.find((entry) => entry.stepId === "step-acceptance");
+  stepShell.dependsOn = ["step-ask"];
+  acceptance.dependsOn = ["step-shell"];
+  writeJson(featuresPath, features);
+
+  const waiting = await main(["run", path.basename(md), "--max-steps", "5"]);
+  assert.equal(waiting, 1);
+  const waitingState = readJson(path.join(md, "state.json"));
+  assert.equal(waitingState.status, "waiting_user");
+  assert.equal(waitingState.currentStepId, "step-ask");
+
+  assert.equal(
+    await main([
+      "answer",
+      path.basename(md),
+      "--step-id",
+      "step-ask",
+      "--response",
+      "Target production first.",
+    ]),
+    0,
+  );
+  assert.equal(await main(["run", path.basename(md), "--max-steps", "5"]), 0);
+  assert.equal(await main(["accept", path.basename(md)]), 0);
+  assert.equal(fs.readFileSync(path.join(fixture.workspace, "marker.txt"), "utf8"), "ok");
 });
 
 test("interactive guide can create run and accept a shell mission", async (t) => {

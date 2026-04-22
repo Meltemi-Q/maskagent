@@ -5,6 +5,7 @@
 MaskAgent is a local mission orchestration CLI for software delivery tasks that need:
 
 - multi-step agent handoffs
+- default plan-first execution
 - persistent mission state under `~/.maskagent/missions/`
 - worker -> validator -> acceptance loops
 - pause/resume/restart
@@ -22,9 +23,11 @@ It is not just a prompt wrapper. A mission is a durable state machine with attem
   - `llm_worker`: strict JSON file deltas returned by a model
   - `external_cli`: Claude Code, Codex, or any local agent CLI
   - `shell`: deterministic smoke tests and validators
+- Defaults adapter-driven and external CLI missions to `plan -> execute -> accept`.
 - Separates worker success from final mission acceptance.
 - Refuses to persist raw API keys. Mission config stores `apiKeyEnvVar` only.
 - Supports pausing an active shell or external CLI worker and re-queueing the current step on resume.
+- Supports `ask_user` steps that stop execution until a human answer is recorded.
 
 ## Repository Layout
 
@@ -132,6 +135,49 @@ Current scheduler behavior:
 - only one active step runs at a time
 - it supports multi-agent / multi-adapter handoff, but not parallel worker execution yet
 
+Planning behavior:
+
+- `llm_worker` and `external_cli` missions now default to `plan-first`
+- the runtime inserts a `model_plan` step ahead of the main worker step
+- `shell` missions stay direct by default
+- you can still force planning explicitly with `mission init --plan-first`
+
+## Planning And ask_user
+
+Plan-first is the default because orchestration needs a stable step graph before execution:
+
+- `goal -> plan -> worker -> acceptance`
+- larger plans can insert `ask_user` steps before downstream work starts
+- `ask_user` is a stop-the-line gate, not a conversational free-for-all
+
+The runtime should ask only when missing information materially changes one of these:
+
+- target behavior or scope
+- architecture or workspace boundaries
+- credentials / environment choices
+- validator / acceptance criteria
+
+It should avoid asking about low-impact preferences that a worker can infer safely.
+
+When a mission pauses for a question, answer it like this:
+
+```bash
+mission status <mission-id>
+mission answer <mission-id> --step-id step-ask-1 --response "Target the production env first."
+mission run <mission-id>
+```
+
+You can also add an explicit question step by hand:
+
+```bash
+mission step add <mission-id> \
+  --step-id step-ask-1 \
+  --title "Confirm target env" \
+  --type ask_user \
+  --question "Which environment should this change target first?" \
+  --reason "The rollout path changes validation and deploy safety."
+```
+
 ## BYOK Model Adapters
 
 OpenAI-compatible worker:
@@ -162,6 +208,21 @@ mission init \
   --model gpt-5.4-mini
 
 mission adapters test <mission-id> gpt-proxy-mini
+```
+
+If you want to inspect only the generated plan before running worker execution:
+
+```bash
+mission init \
+  --name "plan only demo" \
+  --goal "Design the implementation plan for this repo" \
+  --workspace /path/to/repo \
+  --adapter-id gpt-proxy-mini \
+  --provider-type openai_compatible \
+  --base-url "https://gpt.meltemi.fun/v1" \
+  --api-key-env GPT_PROXY_API_KEY \
+  --model gpt-5.4-mini \
+  --plan-only
 ```
 
 ## External CLI Workers

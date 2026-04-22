@@ -11,6 +11,7 @@ import {
   acceptMission,
   addAdapter,
   addStep,
+  answerStepQuestion,
   createMission,
   exportMission,
   homeDir,
@@ -64,6 +65,12 @@ function humanStatus(value: any): string {
         `- ${String(step.stepId).padEnd(18)} ${String(step.status).padEnd(16)} attempts=${step.attemptCount}/${step.retryBudget} ${step.title}`,
     ),
   ];
+  if (value.currentStep?.type === "ask_user" && value.currentStep?.question) {
+    lines.push(`Question: ${value.currentStep.question}`);
+    if (value.currentStep.reason) {
+      lines.push(`Reason:   ${value.currentStep.reason}`);
+    }
+  }
   return lines.join("\n");
 }
 
@@ -376,6 +383,7 @@ async function guideCreateMission(rl: PromptSession, settings: GuideSettings): P
     accept: acceptCommand ? [acceptCommand] : [],
     retryBudget: 2,
     reasoningEffort: settings.reasoningEffort,
+    planFirst: workerType !== "shell",
   };
 
   if (workerType === "llm_worker") {
@@ -519,14 +527,16 @@ async function guideConfigureModelSettings(rl: PromptSession, settings: GuideSet
 
 async function guideMissionActionMenu(rl: PromptSession, missionDir: string): Promise<void> {
   while (true) {
+    const snapshot = statusObject(missionDir);
     print("");
-    print(humanStatus(statusObject(missionDir)));
+    print(humanStatus(snapshot));
     const action = await promptChoice(
       rl,
       "选择 mission 操作：",
       [
         { value: "status", label: "刷新状态" },
         { value: "run", label: "运行 run" },
+        { value: "answer", label: "回答 ask_user 问题" },
         { value: "pause", label: "暂停 mission" },
         { value: "resume", label: "resume + run" },
         { value: "restart", label: "restart + run" },
@@ -541,6 +551,27 @@ async function guideMissionActionMenu(rl: PromptSession, missionDir: string): Pr
     if (action === "run") {
       const maxSteps = await promptNumber(rl, "max steps", { defaultValue: 10, min: 1 });
       print(statusSummary(await runMission(missionDir, maxSteps, false, false)));
+      continue;
+    }
+    if (action === "answer") {
+      const askSteps = (snapshot.steps || []).filter((step: any) => step.type === "ask_user" && !step.answer);
+      if (!askSteps.length) {
+        print("当前没有待回答的 ask_user step。");
+        continue;
+      }
+      print("待回答问题：");
+      for (const [index, step] of askSteps.entries()) {
+        print(`  ${index + 1}. ${step.stepId}  ${step.question}`);
+      }
+      const selected = await promptChoice(
+        rl,
+        "选择问题：",
+        askSteps.map((step: any) => ({ value: step.stepId, label: `${step.stepId}: ${step.question}` })),
+        0,
+      );
+      const response = await promptLine(rl, "你的回答", { required: true });
+      answerStepQuestion(missionDir, selected, response);
+      print(`answered: ${selected}`);
       continue;
     }
     if (action === "pause") {
@@ -701,6 +732,7 @@ async function run(argv: string[]): Promise<number> {
     .option("--adapter-notes <notes>")
     .option("--reasoning-effort <reasoningEffort>", "", "medium")
     .option("--allow-model-commands")
+    .option("--plan-first")
     .option("--plan-only")
     .action((options) => {
       const result = createMission({
@@ -729,6 +761,7 @@ async function run(argv: string[]): Promise<number> {
         adapterNotes: options.adapterNotes,
         reasoningEffort: options.reasoningEffort,
         allowModelCommands: Boolean(options.allowModelCommands),
+        planFirst: options.planFirst ? true : undefined,
         planOnly: Boolean(options.planOnly),
       });
       if (options.json) {
@@ -836,6 +869,18 @@ async function run(argv: string[]): Promise<number> {
   );
 
   addMissionTarget(
+    program.command("answer").requiredOption("--step-id <stepId>").requiredOption("--response <response>").action((mission, options) => {
+      const result = answerStepQuestion(resolveMissionDir(mission), options.stepId, options.response);
+      if (options.json) {
+        printJson(result);
+      } else {
+        print(`answered: ${result.stepId}`);
+      }
+      exitCode = 0;
+    }),
+  );
+
+  addMissionTarget(
     program.command("abort").option("--reason <reason>").action((mission, options) => {
       const result = abortMission(resolveMissionDir(mission), options.reason);
       if (options.json) {
@@ -874,6 +919,7 @@ async function run(argv: string[]): Promise<number> {
         "llm_worker",
         "model_patch",
         "model",
+        "ask_user",
         "noop",
         "acceptance",
       ]).default("llm_worker"),
@@ -882,6 +928,9 @@ async function run(argv: string[]): Promise<number> {
     .option("--command <command>")
     .option("--command-template <commandTemplate>")
     .option("--adapter-ref <adapterRef>")
+    .option("--question <question>")
+    .option("--reason <reason>")
+    .option("--answer <answer>")
     .option("--validate <command>", "", collect, [])
     .option("--depends-on <stepId>", "", collect, [])
     .option("--retry-budget <count>", "", "2")
@@ -897,6 +946,9 @@ async function run(argv: string[]): Promise<number> {
         command: options.command,
         commandTemplate: options.commandTemplate,
         adapterRef: options.adapterRef,
+        question: options.question,
+        reason: options.reason,
+        answer: options.answer,
         validate: options.validate,
         dependsOn: options.dependsOn,
         retryBudget: Number(options.retryBudget),
