@@ -4,6 +4,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
+import { spawn } from "node:child_process";
 
 let cliModule;
 
@@ -47,6 +48,29 @@ function fakeServer(handler) {
   const server = http.createServer(handler);
   return new Promise((resolve) => {
     server.listen(0, "127.0.0.1", () => resolve(server));
+  });
+}
+
+function runCli(args, input = "", env = {}) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ["dist/cli.js", ...args], {
+      cwd: path.resolve("."),
+      env: { ...process.env, ...env },
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += String(chunk);
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr += String(chunk);
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      resolve({ code, stdout, stderr });
+    });
+    child.stdin.end(input);
   });
 }
 
@@ -388,4 +412,32 @@ test("fake openai and anthropic adapters", async (t) => {
   );
   assert.equal(await main(["adapters", "test", path.basename(md), "fake-anthropic"]), 0);
   assert.doesNotMatch(fs.readFileSync(path.join(md, "worker-transcripts.jsonl"), "utf8"), /fake-token-not-written/);
+});
+
+test("interactive guide can create run and accept a shell mission", async (t) => {
+  const fixture = tempFixture();
+  t.after(() => fixture.cleanup());
+  const input = [
+    "1",
+    "guided shell",
+    "write marker from guide",
+    fixture.workspace,
+    "",
+    "3",
+    "test -f marker.txt",
+    "grep -q ok marker.txt",
+    "printf ok > marker.txt",
+    "",
+    "y",
+    "10",
+    "y",
+    "8",
+  ].join("\n") + "\n";
+  const result = await runCli(["guide"], input, { MASKAGENT_HOME: fixture.missions });
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /MaskAgent guide/);
+  assert.match(result.stdout, /已创建 mission/);
+  const md = missionDir(fixture);
+  assert.equal(fs.readFileSync(path.join(fixture.workspace, "marker.txt"), "utf8"), "ok");
+  assert.equal(readJson(path.join(md, "state.json")).state, "accepted");
 });

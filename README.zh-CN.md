@@ -63,6 +63,13 @@ mission --version
 maskagent --version
 ```
 
+交互式引导：
+
+```bash
+mission
+mission guide
+```
+
 直接从源码运行：
 
 ```bash
@@ -75,6 +82,7 @@ node dist/cli.js --help
 - 当前 runtime 已迁到 TypeScript / Node。
 - 推荐安装方式是 `npm install -g . --force`。如果 PATH 上已有旧的 Python 版 `mission` / `maskagent`，这个命令会直接覆盖。
 - 如果你只想在仓库里跑，不需要全局安装，`npm install && npm run build` 后执行 `node dist/cli.js` 即可。
+- 在交互式终端里直接执行 `mission` / `maskagent`，会进入 guide；如果是脚本环境，无参数时会回落到 `--help`。
 
 ## 测试
 
@@ -102,6 +110,13 @@ node dist/cli.js run --max-steps 5
 node dist/cli.js accept
 node dist/cli.js status
 ```
+
+如果你不想手写参数，也可以直接运行 `mission`，按 guide 选择：
+
+- 创建 mission
+- 选择 BYOK / Claude tmux / shell worker
+- 是否立即 `run`
+- 是否继续跑 `acceptance`
 
 ## BYOK / Adapter 模式
 

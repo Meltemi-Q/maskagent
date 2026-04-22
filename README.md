@@ -63,6 +63,13 @@ mission --version
 maskagent --version
 ```
 
+Interactive guide:
+
+```bash
+mission
+mission guide
+```
+
 Run from source:
 
 ```bash
@@ -75,6 +82,7 @@ Notes:
 - The runtime now lives in TypeScript / Node.
 - `npm install -g . --force` is the preferred install path. Use `--force` if an older Python-installed `mission` binary already exists on PATH.
 - If your goal is simply "run the CLI inside the repo", `npm install && npm run build` plus `node dist/cli.js` is enough.
+- In an interactive terminal, running `mission` or `maskagent` with no arguments opens the guide. In non-interactive environments it falls back to `--help`.
 
 ## Test
 
@@ -102,6 +110,13 @@ node dist/cli.js run --max-steps 5
 node dist/cli.js accept
 node dist/cli.js status
 ```
+
+If you do not want to write flags by hand, run `mission` and follow the guide to:
+
+- create a mission
+- choose a BYOK, Claude tmux, or shell worker
+- optionally run it immediately
+- optionally continue into acceptance
 
 ## BYOK Model Adapters
 
