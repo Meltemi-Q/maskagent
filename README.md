@@ -51,13 +51,38 @@ cd maskagent
 PYTHONPATH=src python3 -m mission_runtime.cli --version
 ```
 
-Optional editable install:
+Global Python install:
 
 ```bash
+cd maskagent
+python3 -m pip install .
+mission --version
+maskagent --version
+```
+
+Editable Python install:
+
+```bash
+cd maskagent
 python3 -m pip install -e .
 mission --version
 maskagent --version
 ```
+
+Global npm install:
+
+```bash
+cd maskagent
+npm install -g .
+mission --version
+maskagent --version
+```
+
+Notes:
+
+- The runtime stays in Python; this does not rewrite the product into TypeScript.
+- `npm install -g .` installs a Node launcher that delegates to local `Python 3.9+`.
+- If your goal is simply "run `mission` from anywhere", either `python3 -m pip install .` or `npm install -g .` is enough.
 
 ## Test
 

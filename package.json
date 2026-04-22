@@ -1,0 +1,23 @@
+{
+  "name": "maskagent",
+  "version": "0.3.0",
+  "description": "Global CLI launcher for the MaskAgent mission runtime.",
+  "license": "UNLICENSED",
+  "bin": {
+    "maskagent": "bin/maskagent.mjs",
+    "mission": "bin/maskagent.mjs",
+    "missionctl": "bin/maskagent.mjs"
+  },
+  "files": [
+    "bin",
+    "src",
+    "scripts",
+    "README.md",
+    "README.zh-CN.md",
+    "pyproject.toml",
+    "setup.py"
+  ],
+  "engines": {
+    "node": ">=18"
+  }
+}

@@ -7,7 +7,7 @@ name = "maskagent"
 version = "0.3.0"
 description = "Local LLM-driven mission orchestration CLI with persistent state, worker/validator loop, and model adapters."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.9"
 dependencies = []
 
 [project.scripts]

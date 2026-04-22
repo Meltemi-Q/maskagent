@@ -51,13 +51,38 @@ cd maskagent
 PYTHONPATH=src python3 -m mission_runtime.cli --version
 ```
 
-可选 editable install：
+Python 全局安装：
 
 ```bash
+cd maskagent
+python3 -m pip install .
+mission --version
+maskagent --version
+```
+
+Python editable install：
+
+```bash
+cd maskagent
 python3 -m pip install -e .
 mission --version
 maskagent --version
 ```
+
+npm 全局安装：
+
+```bash
+cd maskagent
+npm install -g .
+mission --version
+maskagent --version
+```
+
+说明：
+
+- 当前 runtime 仍然是 Python，实现没有重写成 TS。
+- `npm install -g .` 安装的是一个 Node launcher，它会转调本机 `Python 3.9+` 来执行 `mission_runtime.cli`。
+- 如果你只是想“任何目录直接敲 `mission` / `maskagent`”，`python3 -m pip install .` 或 `npm install -g .` 都可以。
 
 ## 测试
 
