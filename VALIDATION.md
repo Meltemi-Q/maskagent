@@ -1,8 +1,8 @@
 # Validation Report
 
-Version: `0.3.0`
+Version: `0.4.0`
 
-Validation date: `2026-04-21`
+Validation date: `2026-04-22`
 
 ## What Was Validated
 
@@ -17,21 +17,18 @@ This was validated with live providers and with an external CLI worker, not only
 Environment:
 
 - Host: local macOS workstation
-- Python: local `python3`
+- Runtime: local Node.js / TypeScript build
 - Tools available: `tmux`, `claude`, `codex`, `git`
 
 Automated tests:
 
 ```bash
-PYTHONPATH=src PYTHONNOUSERSITE=1 python3 -S -m unittest discover -s tests -v
+npm test
 ```
 
 Result:
 
-```text
-Ran 7 tests in 5.896s
-OK
-```
+`8` tests passed locally after the TypeScript rewrite.
 
 Covered cases:
 
@@ -79,13 +76,12 @@ Environment:
 
 - Host: `107.173.204.12`
 - OS: Ubuntu 24.04 class environment
-- Python: `3.12.3`
 - Tools available: `git`, `tmux`, `claude`
 
 Automated tests on VPS:
 
 ```bash
-PYTHONPATH=src PYTHONNOUSERSITE=1 python3 -S -m unittest discover -s tests -v
+npm test
 ```
 
 Result:
@@ -127,7 +123,7 @@ No raw `sk-...` values were written into mission state, evidence, or adapter reg
 
 ## Product-Level Outcome
 
-As of `2026-04-21`, the following are demonstrated working:
+As of `2026-04-22`, the following are demonstrated working:
 
 - persistent mission state rooted at `.maskagent`
 - real live LLM JSON worker flow

@@ -4,6 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 GOAL_FILE="${ROOT_DIR}/scripts/benchmarks/mario-full-goal.txt"
 WORKER_SCRIPT="${ROOT_DIR}/scripts/claude_tmux_worker.sh"
+npm --prefix "${ROOT_DIR}" run build >/dev/null
+CLI=(node "${ROOT_DIR}/dist/cli.js")
+BROWSER_CHECK=(node "${ROOT_DIR}/dist/browser-platformer-check.js")
 
 BENCH_HOME="${MASKAGENT_CLAUDE_BENCH_HOME:-${MASKAGENT_BENCH_HOME:-/tmp/maskagent-bench-claude-missions}}"
 BENCH_WORKSPACE="${MASKAGENT_CLAUDE_BENCH_WORKSPACE:-${MASKAGENT_BENCH_WORKSPACE:-/tmp/maskagent-bench-claude-workspace}}"
@@ -29,7 +32,7 @@ mkdir -p "${BENCH_WORKSPACE}"
 GOAL="$(cat "${GOAL_FILE}")"
 START_TS="$(date +%s)"
 
-PYTHONPATH=src python3 -m mission_runtime.cli init \
+"${CLI[@]}" init \
   --mission-id "${BENCH_MISSION_ID}" \
   --force \
   --name "benchmark-mario-claude-tmux" \
@@ -45,14 +48,14 @@ PYTHONPATH=src python3 -m mission_runtime.cli init \
   --accept 'grep -q LEVELS game-core.mjs' \
   --accept "grep -Eiq 'platformer|mario' index.html"
 
-PYTHONPATH=src python3 -m mission_runtime.cli run "${BENCH_MISSION_ID}" --max-steps 3
-PYTHONPATH=src python3 -m mission_runtime.cli accept "${BENCH_MISSION_ID}"
+"${CLI[@]}" run "${BENCH_MISSION_ID}" --max-steps 3
+"${CLI[@]}" accept "${BENCH_MISSION_ID}"
 
 MISSION_DIR="${MASKAGENT_HOME}/${BENCH_MISSION_ID}"
-python3 "${ROOT_DIR}/scripts/browser_platformer_check.py" \
+"${BROWSER_CHECK[@]}" \
   "${BENCH_WORKSPACE}" \
   --output-dir "${MISSION_DIR}/browser-check"
 
 END_TS="$(date +%s)"
 echo "elapsed_seconds=$((END_TS - START_TS))"
-PYTHONPATH=src python3 -m mission_runtime.cli status "${BENCH_MISSION_ID}" --json
+"${CLI[@]}" status "${BENCH_MISSION_ID}" --json

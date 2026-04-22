@@ -29,8 +29,10 @@ It is not just a prompt wrapper. A mission is a durable state machine with attem
 ## Repository Layout
 
 ```text
-src/mission_runtime/cli.py          Main runtime and CLI entrypoint
-tests/test_runtime.py               Unit coverage for mission flow
+src/cli.ts                         TypeScript CLI entrypoint
+src/runtime.ts                     TypeScript runtime and state machine
+src/browser-platformer-check.ts    Browser-level validation script
+tests/runtime.test.mjs             Node test coverage
 scripts/live-openai-compatible-smoke.sh
 scripts/live-minimax-anthropic-smoke.sh
 scripts/claude_tmux_worker.sh
@@ -38,56 +40,46 @@ scripts/live-claude-tmux-smoke.sh
 scripts/run_benchmark_mario_byok.sh
 scripts/run_benchmark_mario_claude_tmux.sh
 scripts/run_benchmark_mario_all.sh
-scripts/browser_platformer_check.py
 VALIDATION.md                       Validation notes and live test results
 ```
 
 ## Install
 
-Run from source:
+Install dependencies and build:
 
 ```bash
 cd maskagent
-PYTHONPATH=src python3 -m mission_runtime.cli --version
-```
-
-Global Python install:
-
-```bash
-cd maskagent
-python3 -m pip install .
-mission --version
-maskagent --version
-```
-
-Editable Python install:
-
-```bash
-cd maskagent
-python3 -m pip install -e .
-mission --version
-maskagent --version
+npm install
+npm run build
+node dist/cli.js --version
 ```
 
 Global npm install:
 
 ```bash
 cd maskagent
-npm install -g .
+npm install -g . --force
 mission --version
 maskagent --version
 ```
 
+Run from source:
+
+```bash
+cd maskagent
+node dist/cli.js --help
+```
+
 Notes:
 
-- The runtime stays in Python; this does not rewrite the product into TypeScript.
-- `npm install -g .` installs a Node launcher that delegates to local `Python 3.9+`.
-- If your goal is simply "run `mission` from anywhere", either `python3 -m pip install .` or `npm install -g .` is enough.
+- The runtime now lives in TypeScript / Node.
+- `npm install -g . --force` is the preferred install path. Use `--force` if an older Python-installed `mission` binary already exists on PATH.
+- If your goal is simply "run the CLI inside the repo", `npm install && npm run build` plus `node dist/cli.js` is enough.
 
 ## Test
 
 ```bash
-PYTHONPATH=src PYTHONNOUSERSITE=1 python3 -S -m unittest discover -s tests -v
+npm test
 ```
 
 ## Quick Start
@@ -98,7 +90,7 @@ Deterministic shell worker:
 export MASKAGENT_HOME=/tmp/missions
 mkdir -p /tmp/demo-workspace
 
-PYTHONPATH=src python3 -m mission_runtime.cli init \
+node dist/cli.js init \
   --name "write marker" \
   --goal "Create a marker file and prove it exists" \
   --workspace /tmp/demo-workspace \
@@ -106,9 +98,9 @@ PYTHONPATH=src python3 -m mission_runtime.cli init \
   --validate "test -f marker.txt" \
   --accept "grep -q ok marker.txt"
 
-PYTHONPATH=src python3 -m mission_runtime.cli run --max-steps 5
-PYTHONPATH=src python3 -m mission_runtime.cli accept
-PYTHONPATH=src python3 -m mission_runtime.cli status
+node dist/cli.js run --max-steps 5
+node dist/cli.js accept
+node dist/cli.js status
 ```
 
 ## BYOK Model Adapters
@@ -244,12 +236,12 @@ You can override generic benchmark env vars such as `MASKAGENT_BENCH_HOME`, `MAS
 
 Browser-level validation means opening the built game in a real browser, not only running `node smoke-test.mjs`.
 
-`scripts/browser_platformer_check.py` starts a temporary static server, opens the app in headless Chrome or Edge, captures a screenshot, dumps the rendered DOM, and checks for core UI markers such as `canvas`, `level`, `score`, `lives`, and `coin`.
+`src/browser-platformer-check.ts` compiles to `dist/browser-platformer-check.js`. It starts a temporary static server, opens the app in headless Chrome or Edge, captures a screenshot, dumps the rendered DOM, and checks for core UI markers such as `canvas`, `platformer`, `move`, and `jump`.
 
 Run it directly:
 
 ```bash
-python3 scripts/browser_platformer_check.py /path/to/workspace
+node dist/browser-platformer-check.js /path/to/workspace
 ```
 
 Artifacts are written to `browser-check/` under the mission directory:

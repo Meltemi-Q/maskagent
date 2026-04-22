@@ -1,23 +1,35 @@
 {
   "name": "maskagent",
-  "version": "0.3.0",
-  "description": "Global CLI launcher for the MaskAgent mission runtime.",
-  "license": "UNLICENSED",
+  "version": "0.4.0",
+  "description": "TypeScript mission orchestration CLI with persistent state, worker/validator loops, and benchmark tooling.",
+  "type": "module",
   "bin": {
-    "maskagent": "bin/maskagent.mjs",
-    "mission": "bin/maskagent.mjs",
-    "missionctl": "bin/maskagent.mjs"
+    "maskagent": "dist/cli.js",
+    "mission": "dist/cli.js",
+    "missionctl": "dist/cli.js"
   },
   "files": [
-    "bin",
-    "src",
+    "dist",
     "scripts",
     "README.md",
     "README.zh-CN.md",
-    "pyproject.toml",
-    "setup.py"
+    "VALIDATION.md"
   ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "test": "npm run build && node --test tests/runtime.test.mjs",
+    "prepare": "npm run build"
+  },
   "engines": {
     "node": ">=18"
+  },
+  "dependencies": {
+    "commander": "^12.1.0",
+    "tar": "^7.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.21",
+    "typescript": "^5.8.3"
   }
 }
