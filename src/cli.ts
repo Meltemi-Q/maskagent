@@ -11,15 +11,18 @@ import {
   acceptMission,
   addAdapter,
   addStep,
+  assignRoleAdapter,
   answerStepQuestion,
   createMission,
   exportMission,
   homeDir,
   listAdapters,
+  listRoutes,
   pauseMission,
   resolveMissionDir,
   restartMission,
   resumeMission,
+  routeStepAdapter,
   runMission,
   statusObject,
   testAdapter,
@@ -64,7 +67,7 @@ function humanStatus(value: any): string {
     "Steps:",
     ...(value.steps || []).map(
       (step: any) =>
-        `- ${String(step.stepId).padEnd(18)} ${String(step.status).padEnd(16)} attempts=${step.attemptCount}/${step.retryBudget} ${step.title}`,
+        `- ${String(step.stepId).padEnd(18)} ${String(step.status).padEnd(16)} attempts=${step.attemptCount}/${step.retryBudget} ${step.title}${step.adapterRef ? ` adapter=${step.adapterRef}` : ""}`,
     ),
   ];
   if (value.currentStep?.type === "ask_user" && value.currentStep?.question) {
@@ -737,6 +740,8 @@ async function run(argv: string[]): Promise<number> {
     .option("--adapter-notes <notes>")
     .option("--reasoning-effort <reasoningEffort>", "", "medium")
     .option("--allow-model-commands")
+    .option("--worker-adapter-id <workerAdapterId>")
+    .option("--orchestrator-adapter-id <orchestratorAdapterId>")
     .option("--plan-first")
     .option("--plan-only")
     .action((options) => {
@@ -766,6 +771,8 @@ async function run(argv: string[]): Promise<number> {
         adapterNotes: options.adapterNotes,
         reasoningEffort: options.reasoningEffort,
         allowModelCommands: Boolean(options.allowModelCommands),
+        workerAdapterId: options.workerAdapterId,
+        orchestratorAdapterId: options.orchestratorAdapterId,
         planFirst: options.planFirst ? true : undefined,
         planOnly: Boolean(options.planOnly),
       });
@@ -981,6 +988,23 @@ async function run(argv: string[]): Promise<number> {
       exitCode = 0;
     });
 
+  step
+    .command("route")
+    .argument("<mission>")
+    .argument("<stepId>")
+    .option("--adapter-ref <adapterRef>")
+    .option("--clear")
+    .option("--json")
+    .action((mission, stepId, options) => {
+      const result = routeStepAdapter(resolveMissionDir(mission), stepId, options.clear ? null : options.adapterRef);
+      if (options.json) {
+        printJson(result);
+      } else {
+        print(`step routed: ${result.stepId} adapter=${result.adapterRef || "default"}`);
+      }
+      exitCode = 0;
+    });
+
   const adapters = program.command("adapters");
   adapters
     .command("add")
@@ -1052,6 +1076,40 @@ async function run(argv: string[]): Promise<number> {
           )
           .join("\n"),
       );
+    }
+    exitCode = 0;
+  });
+
+  adapters.command("routes").argument("<mission>").option("--json").action((mission, options) => {
+    const result = listRoutes(resolveMissionDir(mission));
+    if (options.json) {
+      printJson(result);
+    } else {
+      const roleLines = Object.entries(result.roleAssignments || {})
+        .map(([role, adapterId]) => `- role ${role}: ${adapterId}`)
+        .join("\n");
+      const stepLines = (result.stepRoutes || [])
+        .map((entry: any) => `- step ${entry.stepId}: ${entry.adapterRef} (${entry.type})`)
+        .join("\n");
+      print(
+        [
+          `default: ${result.defaultAdapterRef || "-"}`,
+          "roles:",
+          roleLines || "- none",
+          "step overrides:",
+          stepLines || "- none",
+        ].join("\n"),
+      );
+    }
+    exitCode = 0;
+  });
+
+  adapters.command("assign").argument("<mission>").requiredOption("--role <role>").requiredOption("--adapter-id <adapterId>").option("--json").action((mission, options) => {
+    const result = assignRoleAdapter(resolveMissionDir(mission), options.role, options.adapterId);
+    if (options.json) {
+      printJson(result);
+    } else {
+      print(`role assigned: ${result.role} -> ${result.adapterId}`);
     }
     exitCode = 0;
   });

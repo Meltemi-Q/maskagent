@@ -48,6 +48,15 @@ function writeJson(filePath, data) {
   fs.writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\n`, "utf8");
 }
 
+function readJsonl(filePath) {
+  return fs
+    .readFileSync(filePath, "utf8")
+    .split("\n")
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+}
+
 function fakeServer(handler) {
   const server = http.createServer(handler);
   return new Promise((resolve) => {
@@ -419,6 +428,231 @@ test("fake openai and anthropic adapters", async (t) => {
   );
   assert.equal(await main(["adapters", "test", path.basename(md), "fake-anthropic"]), 0);
   assert.doesNotMatch(fs.readFileSync(path.join(md, "worker-transcripts.jsonl"), "utf8"), /fake-token-not-written/);
+});
+
+test("role routing sends planner and worker to different adapters", async (t) => {
+  const fixture = tempFixture();
+  t.after(() => fixture.cleanup());
+  process.env.FAKE_API_KEY = "fake-token-not-written";
+  const workerServer = await fakeServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(
+      JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                status: "succeeded",
+                summary: "worker adapter wrote marker",
+                files: [{ path: "role-marker.txt", content: "worker-route\n" }],
+                commands: [],
+                openIssues: [],
+              }),
+            },
+          },
+        ],
+      }),
+    );
+  });
+  const plannerServer = await fakeServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(
+      JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                summary: "planner adapter handled plan",
+                steps: [],
+                questions: [],
+                risks: [],
+              }),
+            },
+          },
+        ],
+      }),
+    );
+  });
+  t.after(() => workerServer.close());
+  t.after(() => plannerServer.close());
+  const workerPort = workerServer.address().port;
+  const plannerPort = plannerServer.address().port;
+  const { main } = await loadCli();
+  assert.equal(
+    await main([
+      "init",
+      "--name",
+      "role-routing",
+      "--goal",
+      "plan with one adapter and execute with another",
+      "--workspace",
+      fixture.workspace,
+      "--adapter-id",
+      "worker-default",
+      "--provider-type",
+      "openai_compatible",
+      "--base-url",
+      `http://127.0.0.1:${workerPort}/v1`,
+      "--api-key-env",
+      "FAKE_API_KEY",
+      "--model",
+      "worker-model",
+      "--validate",
+      "test -f role-marker.txt",
+      "--accept",
+      "grep -q worker-route role-marker.txt",
+    ]),
+    0,
+  );
+  const md = missionDir(fixture);
+  assert.equal(
+    await main([
+      "adapters",
+      "add",
+      path.basename(md),
+      "--adapter-id",
+      "planner-route",
+      "--provider-type",
+      "openai_compatible",
+      "--base-url",
+      `http://127.0.0.1:${plannerPort}/v1`,
+      "--api-key-env",
+      "FAKE_API_KEY",
+      "--model",
+      "planner-model",
+    ]),
+    0,
+  );
+  assert.equal(
+    await main([
+      "adapters",
+      "assign",
+      path.basename(md),
+      "--role",
+      "orchestrator",
+      "--adapter-id",
+      "planner-route",
+    ]),
+    0,
+  );
+  assert.equal(await main(["run", path.basename(md), "--max-steps", "10"]), 0);
+  assert.equal(await main(["accept", path.basename(md)]), 0);
+  const transcripts = readJsonl(path.join(md, "worker-transcripts.jsonl")).filter((entry) => entry.kind === "adapter_call");
+  assert.ok(transcripts.some((entry) => entry.role === "orchestrator" && entry.adapterId === "planner-route"));
+  assert.ok(transcripts.some((entry) => entry.role === "worker" && entry.adapterId === "worker-default"));
+});
+
+test("step route overrides worker adapter", async (t) => {
+  const fixture = tempFixture();
+  t.after(() => fixture.cleanup());
+  process.env.FAKE_API_KEY = "fake-token-not-written";
+  const defaultServer = await fakeServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(
+      JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                status: "succeeded",
+                summary: "default adapter wrote marker",
+                files: [{ path: "override-marker.txt", content: "default-route\n" }],
+                commands: [],
+                openIssues: [],
+              }),
+            },
+          },
+        ],
+      }),
+    );
+  });
+  const overrideServer = await fakeServer((_request, response) => {
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(
+      JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                status: "succeeded",
+                summary: "override adapter wrote marker",
+                files: [{ path: "override-marker.txt", content: "override-route\n" }],
+                commands: [],
+                openIssues: [],
+              }),
+            },
+          },
+        ],
+      }),
+    );
+  });
+  t.after(() => defaultServer.close());
+  t.after(() => overrideServer.close());
+  const defaultPort = defaultServer.address().port;
+  const overridePort = overrideServer.address().port;
+  const { main } = await loadCli();
+  assert.equal(
+    await main([
+      "init",
+      "--name",
+      "step-routing",
+      "--goal",
+      "override worker adapter per step",
+      "--workspace",
+      fixture.workspace,
+      "--adapter-id",
+      "default-route",
+      "--provider-type",
+      "openai_compatible",
+      "--base-url",
+      `http://127.0.0.1:${defaultPort}/v1`,
+      "--api-key-env",
+      "FAKE_API_KEY",
+      "--model",
+      "default-model",
+      "--validate",
+      "test -f override-marker.txt",
+      "--accept",
+      "grep -q override-route override-marker.txt",
+    ]),
+    0,
+  );
+  const md = missionDir(fixture);
+  assert.equal(
+    await main([
+      "adapters",
+      "add",
+      path.basename(md),
+      "--adapter-id",
+      "worker-override",
+      "--provider-type",
+      "openai_compatible",
+      "--base-url",
+      `http://127.0.0.1:${overridePort}/v1`,
+      "--api-key-env",
+      "FAKE_API_KEY",
+      "--model",
+      "override-model",
+    ]),
+    0,
+  );
+  assert.equal(
+    await main([
+      "step",
+      "route",
+      path.basename(md),
+      "step-worker",
+      "--adapter-ref",
+      "worker-override",
+    ]),
+    0,
+  );
+  assert.equal(await main(["run", path.basename(md), "--max-steps", "10"]), 0);
+  assert.equal(await main(["accept", path.basename(md)]), 0);
+  assert.equal(fs.readFileSync(path.join(fixture.workspace, "override-marker.txt"), "utf8"), "override-route\n");
+  assert.equal(readJson(path.join(md, "features.json")).steps.find((entry) => entry.stepId === "step-worker").adapterRef, "worker-override");
+  const transcripts = readJsonl(path.join(md, "worker-transcripts.jsonl")).filter((entry) => entry.kind === "adapter_call");
+  assert.ok(transcripts.some((entry) => entry.role === "worker" && entry.adapterId === "worker-override"));
 });
 
 test("ask_user step waits for answer and resumes", async (t) => {

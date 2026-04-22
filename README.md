@@ -142,6 +142,8 @@ Planning behavior:
 - the runtime inserts a `model_plan` step ahead of the main worker step
 - `shell` missions stay direct by default
 - you can still force planning explicitly with `mission init --plan-first`
+- `model_plan` resolves through the `orchestrator` role by default
+- `llm_worker` resolves through the `worker` role by default
 
 Parallel execution example:
 
@@ -151,6 +153,38 @@ mission resume <mission-id> --run --max-steps 20 --max-parallel 4
 ```
 
 Status output now includes active step ids and the current max parallel setting.
+
+## Per-Step Model Routing
+
+MaskAgent now supports two routing layers:
+
+- role defaults: for example `orchestrator -> planner adapter`, `worker -> coder adapter`
+- per-step override: a specific step can force `adapterRef`
+
+Useful commands:
+
+```bash
+mission init \
+  --name "mixed adapters" \
+  --goal "Plan with one model and execute with another" \
+  --workspace /path/to/repo \
+  --adapter-id worker-default \
+  --provider-type openai_compatible \
+  --base-url "https://gpt.meltemi.fun/v1" \
+  --api-key-env GPT_PROXY_API_KEY \
+  --model gpt-5.4-mini \
+  --orchestrator-adapter-id planner-route
+
+mission adapters assign <mission-id> --role orchestrator --adapter-id planner-route
+mission adapters routes <mission-id>
+mission step route <mission-id> step-worker --adapter-ref worker-override
+```
+
+This is the current routing order:
+
+- step `adapterRef`
+- role assignment such as `orchestrator` or `worker`
+- mission `defaultAdapterRef`
 
 ## Planning And ask_user
 

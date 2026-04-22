@@ -390,6 +390,15 @@ function saveAdapter(missionDir: string, adapter: Record<string, any>): void {
   writeJson(path.join(missionDir, "runtime-custom-models.json"), registry);
 }
 
+function assignDefined(target: Record<string, any>, values: Record<string, any>): Record<string, any> {
+  for (const [key, value] of Object.entries(values)) {
+    if (value !== undefined) {
+      target[key] = value;
+    }
+  }
+  return target;
+}
+
 async function httpJson(
   url: string,
   headers: Record<string, string>,
@@ -1093,7 +1102,7 @@ async function executeWorker(missionDir: string, step: any, state: any, features
           missionDir,
           step.adapterRef || step.adapterId,
           prompt,
-          "worker",
+          "orchestrator",
         );
         actions.push({
           kind: "model_call",
@@ -1806,6 +1815,7 @@ export function statusObject(missionDir: string): Record<string, any> {
       retryBudget: entry.retryBudget,
       failureClass: entry.failureClass,
       failureDetail: entry.failureDetail,
+      adapterRef: entry.adapterRef,
       question: entry.question,
       answer: entry.answer,
       reason: entry.reason,
@@ -1874,6 +1884,8 @@ export function createMission(options: InitOptions): Record<string, any> {
     createdAt: now(),
     updatedAt: now(),
   };
+  const workerAdapterRef = options.workerAdapterId || null;
+  const orchestratorAdapterRef = options.orchestratorAdapterId || null;
   writeJson(path.join(missionDir, "state.json"), state);
 
   const validationChecks = (options.validate || []).map((command: string, index: number) => ({
@@ -1901,6 +1913,9 @@ export function createMission(options: InitOptions): Record<string, any> {
       retryBudget: options.retryBudget,
       checks: validationChecks,
     };
+    if (workerAdapterRef) {
+      workerStep.adapterRef = workerAdapterRef;
+    }
   } else if (options.stepCommand) {
     workerStep = {
       stepId: "step-shell",
@@ -1929,6 +1944,9 @@ export function createMission(options: InitOptions): Record<string, any> {
       checks: validationChecks,
       allowModelCommands: Boolean(options.allowModelCommands),
     };
+    if (workerAdapterRef) {
+      workerStep.adapterRef = workerAdapterRef;
+    }
   }
 
   let planStep: any = null;
@@ -1943,8 +1961,8 @@ export function createMission(options: InitOptions): Record<string, any> {
       attemptCount: 0,
       retryBudget: 1,
     };
-    if (options.adapterId) {
-      planStep.adapterRef = options.adapterId;
+    if (orchestratorAdapterRef) {
+      planStep.adapterRef = orchestratorAdapterRef;
     }
     if (options.workerCommand) {
       planStep.commandTemplate = options.workerCommand;
@@ -1996,16 +2014,21 @@ export function createMission(options: InitOptions): Record<string, any> {
   });
   writeJson(path.join(missionDir, "model-settings.json"), {
     version: 1,
-    workerModel: options.adapterId || null,
+    workerModel: workerAdapterRef || options.adapterId || null,
+    orchestratorModel: orchestratorAdapterRef || options.adapterId || null,
     workerReasoningEffort: options.reasoningEffort || "medium",
     defaultAdapterRef: options.adapterId || null,
-    roleAssignments: options.adapterId
-      ? {
-          orchestrator: options.adapterId,
-          worker: options.adapterId,
-          validator: options.adapterId,
-        }
-      : {},
+    roleAssignments: {
+      ...(options.adapterId
+        ? {
+            orchestrator: options.adapterId,
+            worker: options.adapterId,
+            validator: options.adapterId,
+          }
+        : {}),
+      ...(workerAdapterRef ? { worker: workerAdapterRef } : {}),
+      ...(orchestratorAdapterRef ? { orchestrator: orchestratorAdapterRef } : {}),
+    },
     updatedAt: now(),
   });
   writeJson(path.join(missionDir, "runtime-custom-models.json"), { version: 1, customModels: [] });
@@ -2236,40 +2259,101 @@ export function addAdapter(missionDir: string, options: Record<string, any>): Re
   if (options.apiKey) {
     throw new Error("Refusing to store raw API key. Use --api-key-env.");
   }
-  const adapter = {
+  const existing = options.adapterId ? readJson(path.join(missionDir, "runtime-custom-models.json"), { customModels: [] }).customModels
+    ?.find((entry: any) => entry.id === options.adapterId || entry.adapterId === options.adapterId) : null;
+  const adapter = assignDefined(existing ? { ...existing } : {}, {
     id: options.adapterId,
     adapterId: options.adapterId,
     provider: options.providerType,
     providerType: options.providerType,
     model: options.model,
     modelName: options.model,
-    displayName: options.label || options.adapterId,
+    displayName: options.label || (existing?.displayName ? undefined : options.adapterId),
     baseUrl: options.baseUrl,
     apiKeyEnvVar: options.apiKeyEnv,
     noImageSupport: true,
     maxOutputTokens: options.maxOutputTokens,
     timeoutMs: options.timeoutMs,
-    retryPolicy: {
-      maxRetries: options.retries,
-      backoffMs: options.backoffMs,
-    },
-    fallbackAdapterIds: options.fallback || [],
-    capabilityFlags: options.capability || [],
-    enabled: !options.disabled,
     notes: options.notes,
     command: options.command,
-  };
+  });
+  if (options.retries !== undefined || options.backoffMs !== undefined || !adapter.retryPolicy) {
+    adapter.retryPolicy = {
+      maxRetries: options.retries ?? adapter.retryPolicy?.maxRetries ?? 1,
+      backoffMs: options.backoffMs ?? adapter.retryPolicy?.backoffMs ?? 500,
+    };
+  }
+  if (options.fallback?.length) {
+    adapter.fallbackAdapterIds = options.fallback;
+  } else if (!adapter.fallbackAdapterIds) {
+    adapter.fallbackAdapterIds = [];
+  }
+  if (options.capability?.length) {
+    adapter.capabilityFlags = options.capability;
+  } else if (!adapter.capabilityFlags) {
+    adapter.capabilityFlags = [];
+  }
+  if (options.disabled) {
+    adapter.enabled = false;
+  } else if (adapter.enabled === undefined) {
+    adapter.enabled = true;
+  }
   saveAdapter(missionDir, adapter);
   const settings = readJson(path.join(missionDir, "model-settings.json"), {});
   settings.roleAssignments ||= {};
   for (const role of options.role || []) {
     settings.roleAssignments[role] = options.adapterId;
-    if (role === "worker") {
-      settings.workerModel = options.adapterId;
-    }
+    settings[`${role}Model`] = options.adapterId;
   }
   writeJson(path.join(missionDir, "model-settings.json"), settings);
   return { ok: true, adapter };
+}
+
+export function listRoutes(missionDir: string): Record<string, any> {
+  const settings = readJson(path.join(missionDir, "model-settings.json"), {});
+  const features = missionFeatures(missionDir);
+  return {
+    defaultAdapterRef: settings.defaultAdapterRef || null,
+    roleAssignments: settings.roleAssignments || {},
+    stepRoutes: (features.steps || [])
+      .filter((entry: any) => entry.adapterRef)
+      .map((entry: any) => ({
+        stepId: entry.stepId,
+        title: entry.title,
+        type: entry.type,
+        adapterRef: entry.adapterRef,
+      })),
+  };
+}
+
+export function assignRoleAdapter(missionDir: string, role: string, adapterId: string): Record<string, any> {
+  getAdapter(missionDir, adapterId);
+  const settings = readJson(path.join(missionDir, "model-settings.json"), {});
+  settings.roleAssignments ||= {};
+  settings.roleAssignments[role] = adapterId;
+  settings[`${role}Model`] = adapterId;
+  writeJson(path.join(missionDir, "model-settings.json"), settings);
+  event(missionDir, "adapter_role_assigned", { role, adapterId });
+  return { ok: true, role, adapterId };
+}
+
+export function routeStepAdapter(missionDir: string, stepId: string, adapterRef?: string | null): Record<string, any> {
+  const features = missionFeatures(missionDir);
+  const step = (features.steps || []).find((entry: any) => entry.stepId === stepId);
+  if (!step) {
+    throw new Error(`step not found: ${stepId}`);
+  }
+  if (adapterRef) {
+    step.adapterRef = adapterRef;
+  } else {
+    delete step.adapterRef;
+  }
+  writeJson(path.join(missionDir, "features.json"), features);
+  event(missionDir, "step_adapter_routed", {
+    stepId,
+    adapterRef: adapterRef || null,
+  });
+  return { ok: true, stepId, adapterRef: step.adapterRef || null };
 }
 
 export function listAdapters(missionDir: string): Record<string, any> {

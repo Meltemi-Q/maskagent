@@ -142,6 +142,8 @@ node dist/cli.js status
 - runtime 会先插入一个 `model_plan` step，再进入真正的 worker step
 - `shell` mission 默认仍然直接执行
 - 如果你想显式指定，也可以用 `mission init --plan-first`
+- `model_plan` 默认按 `orchestrator` role 解析 adapter
+- `llm_worker` 默认按 `worker` role 解析 adapter
 
 并发执行示例：
 
@@ -151,6 +153,38 @@ mission resume <mission-id> --run --max-steps 20 --max-parallel 4
 ```
 
 现在 `mission status` / guide 页面里也会显示当前 active step 列表和 `maxParallel`。
+
+## Per-Step Model Routing
+
+现在支持两层路由：
+
+- role 默认路由：例如 `orchestrator -> planner adapter`，`worker -> coder adapter`
+- step 级 override：某个 step 可以显式指定 `adapterRef`
+
+常用命令：
+
+```bash
+mission init \
+  --name "mixed adapters" \
+  --goal "Plan with one model and execute with another" \
+  --workspace /path/to/repo \
+  --adapter-id worker-default \
+  --provider-type openai_compatible \
+  --base-url "https://gpt.meltemi.fun/v1" \
+  --api-key-env GPT_PROXY_API_KEY \
+  --model gpt-5.4-mini \
+  --orchestrator-adapter-id planner-route
+
+mission adapters assign <mission-id> --role orchestrator --adapter-id planner-route
+mission adapters routes <mission-id>
+mission step route <mission-id> step-worker --adapter-ref worker-override
+```
+
+当前路由优先级：
+
+- step 上的 `adapterRef`
+- role assignment，例如 `orchestrator` / `worker`
+- mission 级 `defaultAdapterRef`
 
 ## Plan-First 与 ask_user
 
