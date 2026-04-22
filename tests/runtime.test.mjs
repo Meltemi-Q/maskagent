@@ -431,13 +431,32 @@ test("interactive guide can create run and accept a shell mission", async (t) =>
     "y",
     "10",
     "y",
-    "8",
+    "5",
   ].join("\n") + "\n";
   const result = await runCli(["guide"], input, { MASKAGENT_HOME: fixture.missions });
   assert.equal(result.code, 0, result.stderr);
-  assert.match(result.stdout, /MaskAgent guide/);
+  assert.match(result.stdout, /MaskAgent/);
   assert.match(result.stdout, /已创建 mission/);
   const md = missionDir(fixture);
   assert.equal(fs.readFileSync(path.join(fixture.workspace, "marker.txt"), "utf8"), "ok");
   assert.equal(readJson(path.join(md, "state.json")).state, "accepted");
+});
+
+test("interactive guide persists model settings", async (t) => {
+  const fixture = tempFixture();
+  t.after(() => fixture.cleanup());
+  const input = [
+    "4",
+    "2",
+    "2",
+    "my-claude-command",
+    "5",
+  ].join("\n") + "\n";
+  const result = await runCli(["guide"], input, { MASKAGENT_HOME: fixture.missions });
+  assert.equal(result.code, 0, result.stderr);
+  const settingsPath = path.join(fixture.root, "guide-settings.json");
+  const settings = readJson(settingsPath);
+  assert.equal(settings.defaultWorkerType, "external_cli");
+  assert.equal(settings.reasoningEffort, "low");
+  assert.equal(settings.claudeWorkerCommand, "my-claude-command");
 });

@@ -70,6 +70,12 @@ mission
 mission guide
 ```
 
+The landing screen shows:
+
+- the latest mission
+- default worker / model / reasoning settings
+- `Create mission / Continue latest / Browse missions / Model settings`
+
 Run from source:
 
 ```bash
@@ -83,6 +89,7 @@ Notes:
 - `npm install -g . --force` is the preferred install path. Use `--force` if an older Python-installed `mission` binary already exists on PATH.
 - If your goal is simply "run the CLI inside the repo", `npm install && npm run build` plus `node dist/cli.js` is enough.
 - In an interactive terminal, running `mission` or `maskagent` with no arguments opens the guide. In non-interactive environments it falls back to `--help`.
+- Guide defaults are persisted in `~/.maskagent/guide-settings.json`. If you override `MASKAGENT_HOME`, the file lives one directory above that missions home.
 
 ## Test
 
@@ -115,8 +122,15 @@ If you do not want to write flags by hand, run `mission` and follow the guide to
 
 - create a mission
 - choose a BYOK, Claude tmux, or shell worker
+- change the default model, Base URL, API key env, and reasoning effort
 - optionally run it immediately
 - optionally continue into acceptance
+
+Current scheduler behavior:
+
+- the runtime is still a `serial step queue`
+- only one active step runs at a time
+- it supports multi-agent / multi-adapter handoff, but not parallel worker execution yet
 
 ## BYOK Model Adapters
 

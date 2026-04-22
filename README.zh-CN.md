@@ -70,6 +70,12 @@ mission
 mission guide
 ```
 
+首屏会展示：
+
+- 最近一个 mission
+- 默认 worker / model / reasoning 设置
+- `Create mission / Continue latest / Browse missions / 模型设置`
+
 直接从源码运行：
 
 ```bash
@@ -83,6 +89,7 @@ node dist/cli.js --help
 - 推荐安装方式是 `npm install -g . --force`。如果 PATH 上已有旧的 Python 版 `mission` / `maskagent`，这个命令会直接覆盖。
 - 如果你只想在仓库里跑，不需要全局安装，`npm install && npm run build` 后执行 `node dist/cli.js` 即可。
 - 在交互式终端里直接执行 `mission` / `maskagent`，会进入 guide；如果是脚本环境，无参数时会回落到 `--help`。
+- guide 的默认配置会持久化到 `~/.maskagent/guide-settings.json`；如果你自定义了 `MASKAGENT_HOME`，则会落到该 missions 目录的上一级。
 
 ## 测试
 
@@ -115,8 +122,15 @@ node dist/cli.js status
 
 - 创建 mission
 - 选择 BYOK / Claude tmux / shell worker
+- 修改默认模型、Base URL、API key env、reasoning effort
 - 是否立即 `run`
 - 是否继续跑 `acceptance`
+
+当前调度器说明：
+
+- 现在还是 `serial step queue`
+- 一次只会执行一个 active step
+- 支持多 agent / 多 adapter handoff，但不是并行 worker scheduler
 
 ## BYOK / Adapter 模式
 

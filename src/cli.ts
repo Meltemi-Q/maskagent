@@ -135,7 +135,93 @@ type PromptSession = {
   question: (prompt: string) => Promise<string>;
 };
 
+type GuideSettings = {
+  version: number;
+  defaultWorkerType: "llm_worker" | "external_cli" | "shell";
+  reasoningEffort: "minimal" | "low" | "medium" | "high";
+  byokPreset: "gpt_proxy" | "minimax" | "custom_openai" | "custom_anthropic";
+  adapterId: string;
+  providerType: "openai_compatible" | "anthropic_compatible";
+  baseUrl: string;
+  apiKeyEnv: string;
+  model: string;
+  claudeWorkerCommand: string;
+};
+
 class PromptInputClosedError extends Error {}
+
+function guideRootDir(): string {
+  return path.dirname(homeDir());
+}
+
+function guideSettingsPath(): string {
+  return path.join(guideRootDir(), "guide-settings.json");
+}
+
+function defaultGuideSettings(): GuideSettings {
+  return {
+    version: 1,
+    defaultWorkerType: "llm_worker",
+    reasoningEffort: "medium",
+    byokPreset: "gpt_proxy",
+    adapterId: "gpt-proxy-mini",
+    providerType: "openai_compatible",
+    baseUrl: "https://gpt.meltemi.fun/v1",
+    apiKeyEnv: "GPT_PROXY_API_KEY",
+    model: "gpt-5.4-mini",
+    claudeWorkerCommand: defaultClaudeWorkerCommand(),
+  };
+}
+
+function loadGuideSettings(): GuideSettings {
+  const defaults = defaultGuideSettings();
+  const loaded = fs.existsSync(guideSettingsPath()) ? JSON.parse(fs.readFileSync(guideSettingsPath(), "utf8")) : {};
+  return {
+    ...defaults,
+    ...loaded,
+    version: 1,
+  };
+}
+
+function saveGuideSettings(settings: GuideSettings): void {
+  fs.mkdirSync(guideRootDir(), { recursive: true });
+  fs.writeFileSync(guideSettingsPath(), `${JSON.stringify(settings, null, 2)}\n`, "utf8");
+}
+
+function choiceDefaultIndex<T extends { value: string }>(choices: T[], value: string): number {
+  const index = choices.findIndex((choice) => choice.value === value);
+  return index >= 0 ? index : 0;
+}
+
+function guideSettingsSummary(settings: GuideSettings): string[] {
+  const lines = [
+    `Default worker: ${settings.defaultWorkerType}`,
+    `Reasoning:      ${settings.reasoningEffort}`,
+  ];
+  if (settings.defaultWorkerType === "llm_worker") {
+    lines.push(`BYOK preset:     ${settings.byokPreset}`);
+    lines.push(`Model:           ${settings.model}`);
+    lines.push(`Base URL:        ${settings.baseUrl}`);
+    lines.push(`API key env:     ${settings.apiKeyEnv}`);
+  } else if (settings.defaultWorkerType === "external_cli") {
+    lines.push(`Worker command:  ${settings.claudeWorkerCommand}`);
+  } else {
+    lines.push("Worker command:  shell step defined per mission");
+  }
+  return lines;
+}
+
+function latestMissionSummary(): string[] {
+  const latest = listRecentMissions()[0];
+  if (!latest) {
+    return ["Latest mission:  none"];
+  }
+  return [
+    `Latest mission:  ${latest.id}`,
+    `Latest state:    ${latest.state}/${latest.status}`,
+    `Latest name:     ${latest.name}`,
+  ];
+}
 
 function createBufferedPromptSession(): PromptSession {
   const lines = fs.readFileSync(0, "utf8").split(/\r?\n/);
@@ -259,22 +345,23 @@ async function promptMissionSelection(rl: PromptSession, actionLabel: string): P
   }
 }
 
-async function guideCreateMission(rl: PromptSession): Promise<void> {
+async function guideCreateMission(rl: PromptSession, settings: GuideSettings): Promise<void> {
   print("创建 mission");
   const name = await promptLine(rl, "Mission 名称", { defaultValue: "guided mission" });
   const goal = await promptLine(rl, "Mission goal", { required: true });
   const workspace = path.resolve(await promptLine(rl, "Workspace 路径", { defaultValue: process.cwd() }));
   const constraints = parseListInput(await promptLine(rl, "Constraints（可选，用 ; 分隔）"));
 
+  const workerChoices = [
+    { value: "llm_worker", label: "BYOK llm_worker" },
+    { value: "external_cli", label: "Claude Code via tmux" },
+    { value: "shell", label: "shell command" },
+  ] as const;
   const workerType = await promptChoice(
     rl,
     "选择 worker 类型：",
-    [
-      { value: "llm_worker", label: "BYOK llm_worker" },
-      { value: "external_cli", label: "Claude Code via tmux" },
-      { value: "shell", label: "shell command" },
-    ],
-    0,
+    [...workerChoices],
+    choiceDefaultIndex([...workerChoices], settings.defaultWorkerType),
   );
 
   const validateCommand = await promptLine(rl, "Step validate command（可选）");
@@ -288,40 +375,41 @@ async function guideCreateMission(rl: PromptSession): Promise<void> {
     validate: validateCommand ? [validateCommand] : [],
     accept: acceptCommand ? [acceptCommand] : [],
     retryBudget: 2,
-    reasoningEffort: "medium",
+    reasoningEffort: settings.reasoningEffort,
   };
 
   if (workerType === "llm_worker") {
+    const presetChoices = [
+      { value: "gpt_proxy", label: "GPT Proxy (OpenAI-compatible, env GPT_PROXY_API_KEY)" },
+      { value: "minimax", label: "MiniMax (Anthropic-compatible, env MINIMAX_API_KEY)" },
+      { value: "custom_openai", label: "Custom OpenAI-compatible" },
+      { value: "custom_anthropic", label: "Custom Anthropic-compatible" },
+    ] as const;
     const preset = await promptChoice(
       rl,
       "选择 BYOK preset：",
-      [
-        { value: "gpt_proxy", label: "GPT Proxy (OpenAI-compatible, env GPT_PROXY_API_KEY)" },
-        { value: "minimax", label: "MiniMax (Anthropic-compatible, env MINIMAX_API_KEY)" },
-        { value: "custom_openai", label: "Custom OpenAI-compatible" },
-        { value: "custom_anthropic", label: "Custom Anthropic-compatible" },
-      ],
-      0,
+      [...presetChoices],
+      choiceDefaultIndex([...presetChoices], settings.byokPreset),
     );
 
     if (preset === "gpt_proxy") {
-      missionOptions.adapterId = await promptLine(rl, "Adapter id", { defaultValue: "gpt-proxy-mini" });
+      missionOptions.adapterId = await promptLine(rl, "Adapter id", { defaultValue: settings.adapterId });
       missionOptions.providerType = "openai_compatible";
       missionOptions.baseUrl = "https://gpt.meltemi.fun/v1";
       missionOptions.apiKeyEnv = "GPT_PROXY_API_KEY";
-      missionOptions.model = await promptLine(rl, "Model", { defaultValue: "gpt-5.4-mini" });
+      missionOptions.model = await promptLine(rl, "Model", { defaultValue: settings.model });
     } else if (preset === "minimax") {
-      missionOptions.adapterId = await promptLine(rl, "Adapter id", { defaultValue: "minimax-m2" });
+      missionOptions.adapterId = await promptLine(rl, "Adapter id", { defaultValue: settings.adapterId });
       missionOptions.providerType = "anthropic_compatible";
       missionOptions.baseUrl = "https://api.minimaxi.com/anthropic";
       missionOptions.apiKeyEnv = "MINIMAX_API_KEY";
-      missionOptions.model = await promptLine(rl, "Model", { defaultValue: "MiniMax-M2.7" });
+      missionOptions.model = await promptLine(rl, "Model", { defaultValue: settings.model });
     } else {
-      missionOptions.adapterId = await promptLine(rl, "Adapter id", { defaultValue: "byok-custom" });
+      missionOptions.adapterId = await promptLine(rl, "Adapter id", { defaultValue: settings.adapterId });
       missionOptions.providerType = preset === "custom_openai" ? "openai_compatible" : "anthropic_compatible";
-      missionOptions.baseUrl = await promptLine(rl, "Base URL", { required: true });
-      missionOptions.apiKeyEnv = await promptLine(rl, "API key env var", { required: true });
-      missionOptions.model = await promptLine(rl, "Model", { required: true });
+      missionOptions.baseUrl = await promptLine(rl, "Base URL", { required: true, defaultValue: settings.baseUrl });
+      missionOptions.apiKeyEnv = await promptLine(rl, "API key env var", { required: true, defaultValue: settings.apiKeyEnv });
+      missionOptions.model = await promptLine(rl, "Model", { required: true, defaultValue: settings.model });
     }
 
     if (missionOptions.apiKeyEnv && !process.env[missionOptions.apiKeyEnv]) {
@@ -329,7 +417,7 @@ async function guideCreateMission(rl: PromptSession): Promise<void> {
     }
   } else if (workerType === "external_cli") {
     missionOptions.workerCommand = await promptLine(rl, "Claude worker command", {
-      defaultValue: defaultClaudeWorkerCommand(),
+      defaultValue: settings.claudeWorkerCommand,
       required: true,
     });
     print("提示: 这条链路要求本机有 claude、tmux，且 claude 已登录。");
@@ -360,58 +448,141 @@ async function guideCreateMission(rl: PromptSession): Promise<void> {
   print(humanStatus(statusObject(created.missionDir)));
 }
 
-async function guideRunMission(rl: PromptSession): Promise<void> {
-  const missionDir = await promptMissionSelection(rl, "运行");
-  if (!missionDir) {
-    return;
+async function guideConfigureModelSettings(rl: PromptSession, settings: GuideSettings): Promise<GuideSettings> {
+  print("Model settings");
+  const workerChoices = [
+    { value: "llm_worker", label: "BYOK llm_worker" },
+    { value: "external_cli", label: "Claude Code via tmux" },
+    { value: "shell", label: "shell command" },
+  ] as const;
+  const effortChoices = [
+    { value: "minimal", label: "minimal" },
+    { value: "low", label: "low" },
+    { value: "medium", label: "medium" },
+    { value: "high", label: "high" },
+  ] as const;
+  const nextSettings: GuideSettings = { ...settings };
+  nextSettings.defaultWorkerType = await promptChoice(
+    rl,
+    "默认 worker：",
+    [...workerChoices],
+    choiceDefaultIndex([...workerChoices], settings.defaultWorkerType),
+  ) as GuideSettings["defaultWorkerType"];
+  nextSettings.reasoningEffort = await promptChoice(
+    rl,
+    "默认 reasoning effort：",
+    [...effortChoices],
+    choiceDefaultIndex([...effortChoices], settings.reasoningEffort),
+  ) as GuideSettings["reasoningEffort"];
+
+  if (nextSettings.defaultWorkerType === "llm_worker") {
+    const presetChoices = [
+      { value: "gpt_proxy", label: "GPT Proxy" },
+      { value: "minimax", label: "MiniMax" },
+      { value: "custom_openai", label: "Custom OpenAI-compatible" },
+      { value: "custom_anthropic", label: "Custom Anthropic-compatible" },
+    ] as const;
+    nextSettings.byokPreset = await promptChoice(
+      rl,
+      "默认 BYOK preset：",
+      [...presetChoices],
+      choiceDefaultIndex([...presetChoices], settings.byokPreset),
+    ) as GuideSettings["byokPreset"];
+
+    if (nextSettings.byokPreset === "gpt_proxy") {
+      nextSettings.providerType = "openai_compatible";
+      nextSettings.baseUrl = "https://gpt.meltemi.fun/v1";
+      nextSettings.apiKeyEnv = "GPT_PROXY_API_KEY";
+    } else if (nextSettings.byokPreset === "minimax") {
+      nextSettings.providerType = "anthropic_compatible";
+      nextSettings.baseUrl = "https://api.minimaxi.com/anthropic";
+      nextSettings.apiKeyEnv = "MINIMAX_API_KEY";
+    } else {
+      nextSettings.providerType = nextSettings.byokPreset === "custom_openai" ? "openai_compatible" : "anthropic_compatible";
+      nextSettings.baseUrl = await promptLine(rl, "Base URL", { defaultValue: settings.baseUrl, required: true });
+      nextSettings.apiKeyEnv = await promptLine(rl, "API key env", { defaultValue: settings.apiKeyEnv, required: true });
+    }
+
+    nextSettings.adapterId = await promptLine(rl, "Adapter id", { defaultValue: settings.adapterId, required: true });
+    nextSettings.model = await promptLine(rl, "Model", { defaultValue: settings.model, required: true });
+  } else if (nextSettings.defaultWorkerType === "external_cli") {
+    nextSettings.claudeWorkerCommand = await promptLine(rl, "Claude worker command", {
+      defaultValue: settings.claudeWorkerCommand,
+      required: true,
+    });
   }
-  const maxSteps = await promptNumber(rl, "max steps", { defaultValue: 10, min: 1 });
-  print(statusSummary(await runMission(missionDir, maxSteps, false, false)));
+
+  saveGuideSettings(nextSettings);
+  print(`已保存到 ${guideSettingsPath()}`);
+  return nextSettings;
 }
 
-async function guideStatusMission(rl: PromptSession): Promise<void> {
-  const missionDir = await promptMissionSelection(rl, "查看");
-  if (!missionDir) {
+async function guideMissionActionMenu(rl: PromptSession, missionDir: string): Promise<void> {
+  while (true) {
+    print("");
+    print(humanStatus(statusObject(missionDir)));
+    const action = await promptChoice(
+      rl,
+      "选择 mission 操作：",
+      [
+        { value: "status", label: "刷新状态" },
+        { value: "run", label: "运行 run" },
+        { value: "pause", label: "暂停 mission" },
+        { value: "resume", label: "resume + run" },
+        { value: "restart", label: "restart + run" },
+        { value: "accept", label: "执行 acceptance" },
+        { value: "back", label: "返回首页" },
+      ],
+      0,
+    );
+    if (action === "status") {
+      continue;
+    }
+    if (action === "run") {
+      const maxSteps = await promptNumber(rl, "max steps", { defaultValue: 10, min: 1 });
+      print(statusSummary(await runMission(missionDir, maxSteps, false, false)));
+      continue;
+    }
+    if (action === "pause") {
+      const result = pauseMission(missionDir);
+      print(`pause requested: ${result.resumeFrom}`);
+      continue;
+    }
+    if (action === "resume") {
+      const maxSteps = await promptNumber(rl, "max steps", { defaultValue: 10, min: 1 });
+      const result = await resumeMission(missionDir, true, maxSteps);
+      print(`resumed: ${result.status} resumeFrom=${result.resumeFrom}`);
+      continue;
+    }
+    if (action === "restart") {
+      const maxSteps = await promptNumber(rl, "max steps", { defaultValue: 10, min: 1 });
+      const result = await restartMission(missionDir, true, maxSteps);
+      print(`restart: ${result.status} resumeFrom=${result.resumeFrom}`);
+      continue;
+    }
+    if (action === "accept") {
+      print(acceptanceSummary(await acceptMission(missionDir)));
+      continue;
+    }
     return;
   }
-  print(humanStatus(statusObject(missionDir)));
 }
 
-async function guidePauseMission(rl: PromptSession): Promise<void> {
-  const missionDir = await promptMissionSelection(rl, "暂停");
-  if (!missionDir) {
+async function guideContinueLatestMission(rl: PromptSession): Promise<void> {
+  const latest = listRecentMissions()[0];
+  if (!latest) {
+    print("当前没有 mission。");
     return;
   }
-  const result = pauseMission(missionDir);
-  print(`pause requested: ${result.resumeFrom}`);
+  await guideMissionActionMenu(rl, latest.dir);
 }
 
-async function guideResumeMission(rl: PromptSession): Promise<void> {
-  const missionDir = await promptMissionSelection(rl, "恢复");
+async function guideBrowseMissions(rl: PromptSession): Promise<void> {
+  const missionDir = await promptMissionSelection(rl, "打开");
   if (!missionDir) {
     return;
   }
-  const maxSteps = await promptNumber(rl, "max steps", { defaultValue: 10, min: 1 });
-  const result = await resumeMission(missionDir, true, maxSteps);
-  print(`resumed: ${result.status} resumeFrom=${result.resumeFrom}`);
-}
-
-async function guideRestartMission(rl: PromptSession): Promise<void> {
-  const missionDir = await promptMissionSelection(rl, "重跑");
-  if (!missionDir) {
-    return;
-  }
-  const maxSteps = await promptNumber(rl, "max steps", { defaultValue: 10, min: 1 });
-  const result = await restartMission(missionDir, true, maxSteps);
-  print(`restart: ${result.status} resumeFrom=${result.resumeFrom}`);
-}
-
-async function guideAcceptMission(rl: PromptSession): Promise<void> {
-  const missionDir = await promptMissionSelection(rl, "验收");
-  if (!missionDir) {
-    return;
-  }
-  print(acceptanceSummary(await acceptMission(missionDir)));
+  await guideMissionActionMenu(rl, missionDir);
 }
 
 async function runGuide(): Promise<number> {
@@ -423,23 +594,28 @@ async function runGuide(): Promise<number> {
         terminal: true,
       })
     : createBufferedPromptSession();
-  print("MaskAgent guide");
-  print(`Mission home: ${homeDir()}`);
-  print("提示: 直接按 Enter 会采用默认值，Ctrl+C 可退出。");
+  let settings = loadGuideSettings();
   try {
     while (true) {
+      print("MaskAgent");
+      print(`Mission home:    ${homeDir()}`);
+      print("Execution mode: serial step queue");
+      for (const line of guideSettingsSummary(settings)) {
+        print(line);
+      }
+      for (const line of latestMissionSummary()) {
+        print(line);
+      }
+      print("提示: 直接按 Enter 会采用默认值，Ctrl+C 可退出。");
       print("");
       const action = await promptChoice(
         rl,
         "选择操作：",
         [
           { value: "create", label: "创建 mission" },
-          { value: "run", label: "运行 mission" },
-          { value: "status", label: "查看状态" },
-          { value: "pause", label: "暂停 mission" },
-          { value: "resume", label: "恢复并继续 run" },
-          { value: "restart", label: "restart 并继续 run" },
-          { value: "accept", label: "执行 acceptance" },
+          { value: "continue_latest", label: "继续最近 mission" },
+          { value: "browse", label: "浏览 mission 列表" },
+          { value: "settings", label: "模型 / worker 设置" },
           { value: "exit", label: "退出" },
         ],
         0,
@@ -447,23 +623,18 @@ async function runGuide(): Promise<number> {
       print("");
       try {
         if (action === "create") {
-          await guideCreateMission(rl);
-        } else if (action === "run") {
-          await guideRunMission(rl);
-        } else if (action === "status") {
-          await guideStatusMission(rl);
-        } else if (action === "pause") {
-          await guidePauseMission(rl);
-        } else if (action === "resume") {
-          await guideResumeMission(rl);
-        } else if (action === "restart") {
-          await guideRestartMission(rl);
-        } else if (action === "accept") {
-          await guideAcceptMission(rl);
+          await guideCreateMission(rl, settings);
+        } else if (action === "continue_latest") {
+          await guideContinueLatestMission(rl);
+        } else if (action === "browse") {
+          await guideBrowseMissions(rl);
+        } else if (action === "settings") {
+          settings = await guideConfigureModelSettings(rl, settings);
         } else {
           print("已退出 guide。");
           return 0;
         }
+        print("");
       } catch (error) {
         if (error instanceof PromptInputClosedError) {
           print("guide input ended.");
